@@ -1,0 +1,12 @@
+# Binaries and test output
+/bin/
+*.exe
+*.test
+*.out
+
+# Local env
+.env
+.env.*
+
+# OS / editor
+.DS_Store

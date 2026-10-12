@@ -1,0 +1,17 @@
+---
+description: Rules for the durable-flow project
+alwaysApply: true
+---
+- Read docs/ (or the master spec) before changing engine logic.
+- internal/ is the engine. examples/ and cmd/demo-* import sdk/ only, never internal/.
+- Hand-written SQL with pgx. No ORM.
+- Every state transition for a workflow runs in one transaction that first does
+  SELECT ... FOR UPDATE on the workflows row.
+- Any task completion/heartbeat/failure must verify status='leased' AND lease_token matches.
+- Workflow code must stay deterministic: no time.Now, rand, uuid, goroutines, map-order dependence.
+- Never change a test to make it pass. If a test fails, explain why and fix the code,
+  or ask me if the test itself is wrong.
+- Do not add dependencies without asking.
+- Keep functions small, return errors with context (fmt.Errorf("...: %w", err)).
+- Before writing code for a phase marked HARD, explain the design in plain
+  English, list the failure cases, and wait for my confirmation.
