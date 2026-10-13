@@ -21,6 +21,10 @@ var (
 	ErrUnsupportedCommand = errors.New("unsupported command")
 )
 
+// DefaultMaxRedeliveries is how many times a crashed activity is queued again
+// before the engine fails it. Application retries do not use this counter.
+const DefaultMaxRedeliveries = 20
+
 // Config tunes the connection pool. Zero values keep the pgx defaults.
 type Config struct {
 	MaxConns int32

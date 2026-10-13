@@ -237,7 +237,7 @@ func (w *Worker) handleWorkflow(ctx context.Context, task polledTask) {
 		w.failWorkflow(ctx, task, failure.Message, failure.NonDeterminism)
 		return
 	}
-	body, err := workflowCompletion(task.LeaseToken, commands)
+	body, err := workflowCompletion(task.LeaseToken, w.workerID, commands)
 	if err != nil {
 		w.failWorkflow(ctx, task, err.Error(), false)
 		return
@@ -301,8 +301,9 @@ func (w *Worker) handleActivity(ctx context.Context, task polledTask) {
 	}
 	status, postErr := w.http.post(ctx, fmt.Sprintf("/v1/tasks/%d/complete-activity", task.TaskID), struct {
 		LeaseToken int64           `json:"lease_token"`
+		WorkerID   string          `json:"worker_id"`
 		Result     json.RawMessage `json:"result"`
-	}{LeaseToken: task.LeaseToken, Result: result}, nil)
+	}{LeaseToken: task.LeaseToken, WorkerID: w.workerID, Result: result}, nil)
 	if postErr != nil && status != http.StatusConflict {
 		slog.Error("complete activity", "task", task.TaskID, "err", postErr)
 	}
@@ -334,6 +335,7 @@ func (w *Worker) heartbeatActivity(ctx context.Context, task polledTask, leaseLo
 func (w *Worker) failWorkflow(ctx context.Context, task polledTask, message string, nonDeterminism bool) {
 	_, err := w.http.post(ctx, fmt.Sprintf("/v1/tasks/%d/fail-workflow", task.TaskID), map[string]any{
 		"lease_token":     task.LeaseToken,
+		"worker_id":       w.workerID,
 		"error":           message,
 		"non_determinism": nonDeterminism,
 	}, nil)
@@ -345,6 +347,7 @@ func (w *Worker) failWorkflow(ctx context.Context, task polledTask, message stri
 func (w *Worker) failActivity(ctx context.Context, task polledTask, message string, nonRetryable bool) {
 	_, err := w.http.post(ctx, fmt.Sprintf("/v1/tasks/%d/fail-activity", task.TaskID), map[string]any{
 		"lease_token":   task.LeaseToken,
+		"worker_id":     w.workerID,
 		"error":         message,
 		"non_retryable": nonRetryable,
 	}, nil)
@@ -360,7 +363,7 @@ type wireRetry struct {
 	MaxIntervalMS     int64   `json:"max_interval_ms"`
 }
 
-func workflowCompletion(token int64, commands []workflow.Command) (any, error) {
+func workflowCompletion(token int64, workerID string, commands []workflow.Command) (any, error) {
 	wire := make([]any, 0, len(commands))
 	for _, cmd := range commands {
 		encoded, err := wireCommand(cmd)
@@ -370,9 +373,10 @@ func workflowCompletion(token int64, commands []workflow.Command) (any, error) {
 		wire = append(wire, encoded)
 	}
 	return struct {
-		LeaseToken int64 `json:"lease_token"`
-		Commands   []any `json:"commands"`
-	}{LeaseToken: token, Commands: wire}, nil
+		LeaseToken int64  `json:"lease_token"`
+		WorkerID   string `json:"worker_id"`
+		Commands   []any  `json:"commands"`
+	}{LeaseToken: token, WorkerID: workerID, Commands: wire}, nil
 }
 
 func wireCommand(cmd workflow.Command) (any, error) {

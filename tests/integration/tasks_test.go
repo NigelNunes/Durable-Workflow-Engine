@@ -221,6 +221,11 @@ func TestPollWorkflowTaskReturnsHistory(t *testing.T) {
 
 func newQueueServer(t *testing.T, leaseTTL time.Duration, maxConns int32, reaperEvery time.Duration) *httptest.Server {
 	t.Helper()
+	return startQueueServer(t, leaseTTL, maxConns, reaperEvery, store.DefaultMaxRedeliveries)
+}
+
+func startQueueServer(t *testing.T, leaseTTL time.Duration, maxConns int32, reaperEvery time.Duration, maxRedeliveries int) *httptest.Server {
+	t.Helper()
 	resetQueue(t)
 	st, err := store.Open(context.Background(), dbURL, store.Config{MaxConns: maxConns})
 	if err != nil {
@@ -230,7 +235,7 @@ func newQueueServer(t *testing.T, leaseTTL time.Duration, maxConns int32, reaper
 	if reaperEvery > 0 {
 		ctx, cancel := context.WithCancel(context.Background())
 		t.Cleanup(cancel)
-		go engine.RunReaper(ctx, st, reaperEvery)
+		go engine.RunReaper(ctx, st, reaperEvery, maxRedeliveries)
 	}
 	srv := httptest.NewServer(api.NewHandler(st, api.Config{
 		DemoKey:           demoKey,

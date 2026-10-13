@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"strconv"
 	"time"
 
 	"github.com/nigelnunes/durable-flow/internal/api"
@@ -47,6 +48,10 @@ func run() error {
 	if err != nil {
 		return err
 	}
+	maxRedeliveries, err := envInt("MAX_REDELIVERIES", store.DefaultMaxRedeliveries)
+	if err != nil {
+		return err
+	}
 
 	ctx := context.Background()
 	if _, err := store.Migrate(ctx, databaseURL, migrations.FS); err != nil {
@@ -60,7 +65,7 @@ func run() error {
 
 	reapCtx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	go engine.RunReaper(reapCtx, st, reaperInterval)
+	go engine.RunReaper(reapCtx, st, reaperInterval, maxRedeliveries)
 
 	srv := &http.Server{
 		Addr: ":" + port,
@@ -73,6 +78,21 @@ func run() error {
 	}
 	slog.Info("engine listening", "addr", srv.Addr)
 	return srv.ListenAndServe()
+}
+
+func envInt(key string, fallback int) (int, error) {
+	raw := os.Getenv(key)
+	if raw == "" {
+		return fallback, nil
+	}
+	n, err := strconv.Atoi(raw)
+	if err != nil {
+		return 0, fmt.Errorf("%s: %w", key, err)
+	}
+	if n <= 0 {
+		return 0, fmt.Errorf("%s must be positive", key)
+	}
+	return n, nil
 }
 
 func envDuration(key string, fallback time.Duration) (time.Duration, error) {

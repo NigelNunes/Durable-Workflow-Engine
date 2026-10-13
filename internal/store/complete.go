@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"strconv"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -27,134 +28,78 @@ type WorkflowCommand struct {
 // CompleteWorkflowTask applies commands when the workflow history still matches
 // the length recorded at poll. A mismatch throws the commands away and queues
 // a fresh workflow task. The task row is locked before the workflow row.
-func (s *Store) CompleteWorkflowTask(ctx context.Context, taskID, leaseToken int64, commands []WorkflowCommand) error {
+func (s *Store) CompleteWorkflowTask(ctx context.Context, taskID, leaseToken int64, workerID string, commands []WorkflowCommand) error {
 	if err := checkCommands(commands); err != nil {
 		return err
 	}
-
-	tx, err := s.pool.Begin(ctx)
-	if err != nil {
-		return fmt.Errorf("begin complete workflow task: %w", err)
-	}
-	defer tx.Rollback(ctx)
-
-	task, err := lockLeasedTask(ctx, tx, taskID, leaseToken)
-	if err != nil {
-		return err
-	}
-	if task.Kind != "workflow" {
-		return fmt.Errorf("%w: task %d is a %s task", ErrBadCommand, taskID, task.Kind)
-	}
-	state, err := lockWorkflow(ctx, tx, task.WorkflowID)
-	if err != nil {
-		return err
-	}
-
-	if task.Dispatched == nil || *task.Dispatched != state.HistoryLen {
-		if err := markTaskDone(ctx, tx, taskID); err != nil {
+	return s.withLease(ctx, taskID, leaseToken, workerID, func(tx pgx.Tx, task taskRow) error {
+		if task.Kind != "workflow" {
+			return fmt.Errorf("%w: task %d is a %s task", ErrBadCommand, taskID, task.Kind)
+		}
+		state, err := lockWorkflow(ctx, tx, task.WorkflowID)
+		if err != nil {
 			return err
 		}
-		if err := enqueueWorkflowTask(ctx, tx, task.WorkflowID); err != nil {
-			return err
+		if task.Dispatched == nil || *task.Dispatched != state.HistoryLen {
+			if err := markTaskDone(ctx, tx, taskID); err != nil {
+				return err
+			}
+			return enqueueWorkflowTask(ctx, tx, task.WorkflowID)
 		}
-		if err := tx.Commit(ctx); err != nil {
-			return fmt.Errorf("commit stale workflow task: %w", err)
+		for _, cmd := range commands {
+			if err := applyWorkflowCommand(ctx, tx, task.WorkflowID, cmd); err != nil {
+				return err
+			}
 		}
-		return nil
-	}
-
-	for _, cmd := range commands {
-		if err := applyWorkflowCommand(ctx, tx, task.WorkflowID, cmd); err != nil {
-			return err
-		}
-	}
-	if err := markTaskDone(ctx, tx, taskID); err != nil {
-		return err
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return fmt.Errorf("commit workflow task: %w", err)
-	}
-	return nil
+		return markTaskDone(ctx, tx, taskID)
+	})
 }
 
 // CompleteActivityTask records ActivityCompleted once, then queues a workflow
 // task when one is not already open. A second result for the same command is
 // ignored and the task is marked done.
-func (s *Store) CompleteActivityTask(ctx context.Context, taskID, leaseToken int64, result json.RawMessage) error {
-	tx, err := s.pool.Begin(ctx)
-	if err != nil {
-		return fmt.Errorf("begin complete activity: %w", err)
-	}
-	defer tx.Rollback(ctx)
-
-	if err := finishActivity(ctx, tx, taskID, leaseToken, false, result, "", false); err != nil {
-		return err
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return fmt.Errorf("commit activity completion: %w", err)
-	}
-	return nil
+func (s *Store) CompleteActivityTask(ctx context.Context, taskID, leaseToken int64, workerID string, result json.RawMessage) error {
+	return s.withLease(ctx, taskID, leaseToken, workerID, func(tx pgx.Tx, task taskRow) error {
+		return finishActivity(ctx, tx, task, false, result, "", false)
+	})
 }
 
-// FailActivityTask records a terminal ActivityFailed. Retries arrive in a later phase.
-func (s *Store) FailActivityTask(ctx context.Context, taskID, leaseToken int64, message string, nonRetryable bool) error {
-	tx, err := s.pool.Begin(ctx)
-	if err != nil {
-		return fmt.Errorf("begin fail activity: %w", err)
-	}
-	defer tx.Rollback(ctx)
-
-	if err := finishActivity(ctx, tx, taskID, leaseToken, true, nil, message, nonRetryable); err != nil {
-		return err
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return fmt.Errorf("commit activity failure: %w", err)
-	}
-	return nil
+// FailActivityTask retries a retryable error while attempts remain.
+// Otherwise it records a terminal ActivityFailed.
+func (s *Store) FailActivityTask(ctx context.Context, taskID, leaseToken int64, workerID, message string, nonRetryable bool) error {
+	return s.withLease(ctx, taskID, leaseToken, workerID, func(tx pgx.Tx, task taskRow) error {
+		return finishActivity(ctx, tx, task, true, nil, message, nonRetryable)
+	})
 }
 
 // FailWorkflowTask closes the workflow. nonDeterminism is stored on the event
 // so a code mismatch can be told apart from a panic in the workflow function.
-func (s *Store) FailWorkflowTask(ctx context.Context, taskID, leaseToken int64, message string, nonDeterminism bool) error {
-	tx, err := s.pool.Begin(ctx)
-	if err != nil {
-		return fmt.Errorf("begin fail workflow task: %w", err)
-	}
-	defer tx.Rollback(ctx)
-
-	task, err := lockLeasedTask(ctx, tx, taskID, leaseToken)
-	if err != nil {
-		return err
-	}
-	if task.Kind != "workflow" {
-		return fmt.Errorf("%w: task %d is a %s task", ErrBadCommand, taskID, task.Kind)
-	}
-	state, err := lockWorkflow(ctx, tx, task.WorkflowID)
-	if err != nil {
-		return err
-	}
-	if state.Status == "running" {
-		data, err := json.Marshal(struct {
-			Error          string `json:"error"`
-			NonDeterminism bool   `json:"non_determinism"`
-		}{Error: message, NonDeterminism: nonDeterminism})
+func (s *Store) FailWorkflowTask(ctx context.Context, taskID, leaseToken int64, workerID, message string, nonDeterminism bool) error {
+	return s.withLease(ctx, taskID, leaseToken, workerID, func(tx pgx.Tx, task taskRow) error {
+		if task.Kind != "workflow" {
+			return fmt.Errorf("%w: task %d is a %s task", ErrBadCommand, taskID, task.Kind)
+		}
+		state, err := lockWorkflow(ctx, tx, task.WorkflowID)
 		if err != nil {
-			return fmt.Errorf("encode workflow failed: %w", err)
-		}
-		if err := appendEvents(ctx, tx, task.WorkflowID, NewEvent{Type: history.WorkflowFailed, Data: data}); err != nil {
 			return err
 		}
-		if err := failWorkflow(ctx, tx, task.WorkflowID, message); err != nil {
-			return err
+		if state.Status == "running" {
+			data, err := json.Marshal(struct {
+				Error          string `json:"error"`
+				NonDeterminism bool   `json:"non_determinism"`
+			}{Error: message, NonDeterminism: nonDeterminism})
+			if err != nil {
+				return fmt.Errorf("encode workflow failed: %w", err)
+			}
+			if err := appendEvents(ctx, tx, task.WorkflowID, NewEvent{Type: history.WorkflowFailed, Data: data}); err != nil {
+				return err
+			}
+			if err := failWorkflow(ctx, tx, task.WorkflowID, message); err != nil {
+				return err
+			}
 		}
-	}
-	if err := markTaskDone(ctx, tx, taskID); err != nil {
-		return err
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return fmt.Errorf("commit workflow failure: %w", err)
-	}
-	return nil
+		return markTaskDone(ctx, tx, task.ID)
+	})
 }
 
 func checkCommands(commands []WorkflowCommand) error {
@@ -174,13 +119,9 @@ func checkCommands(commands []WorkflowCommand) error {
 	return nil
 }
 
-func finishActivity(ctx context.Context, tx pgx.Tx, taskID, leaseToken int64, failed bool, result json.RawMessage, message string, nonRetryable bool) error {
-	task, err := lockLeasedTask(ctx, tx, taskID, leaseToken)
-	if err != nil {
-		return err
-	}
+func finishActivity(ctx context.Context, tx pgx.Tx, task taskRow, failed bool, result json.RawMessage, message string, nonRetryable bool) error {
 	if task.Kind != "activity" || task.CommandSeq == nil {
-		return fmt.Errorf("%w: task %d is not an activity task", ErrBadCommand, taskID)
+		return fmt.Errorf("%w: task %d is not an activity task", ErrBadCommand, task.ID)
 	}
 	state, err := lockWorkflow(ctx, tx, task.WorkflowID)
 	if err != nil {
@@ -190,21 +131,98 @@ func finishActivity(ctx context.Context, tx pgx.Tx, taskID, leaseToken int64, fa
 	if err != nil {
 		return err
 	}
-	if !done {
-		event, err := activityResultEvent(*task.CommandSeq, failed, result, message, nonRetryable)
-		if err != nil {
+	if done {
+		return markTaskDone(ctx, tx, task.ID)
+	}
+	if failed && !nonRetryable && task.Attempt < task.MaxAttempts {
+		return scheduleActivityRetry(ctx, tx, task, message)
+	}
+	event, err := activityResultEvent(*task.CommandSeq, failed, result, message, nonRetryable)
+	if err != nil {
+		return err
+	}
+	if err := appendEvents(ctx, tx, task.WorkflowID, event); err != nil {
+		return err
+	}
+	if failed {
+		if err := setLastError(ctx, tx, task.ID, message); err != nil {
 			return err
-		}
-		if err := appendEvents(ctx, tx, task.WorkflowID, event); err != nil {
-			return err
-		}
-		if state.Status == "running" {
-			if err := enqueueWorkflowTask(ctx, tx, task.WorkflowID); err != nil {
-				return err
-			}
 		}
 	}
-	return markTaskDone(ctx, tx, taskID)
+	if state.Status == "running" {
+		if err := enqueueWorkflowTask(ctx, tx, task.WorkflowID); err != nil {
+			return err
+		}
+	}
+	return markTaskDone(ctx, tx, task.ID)
+}
+
+func scheduleActivityRetry(ctx context.Context, tx pgx.Tx, task taskRow, message string) error {
+	policy, err := loadRetryPolicy(ctx, tx, task.WorkflowID, *task.CommandSeq)
+	if err != nil {
+		return err
+	}
+	delay := backoffDelay(task.Attempt, policy)
+	var runAt time.Time
+	if err := tx.QueryRow(ctx, `
+		UPDATE tasks SET
+			status = 'pending',
+			attempt = attempt + 1,
+			run_at = now() + ($2::bigint * interval '1 millisecond'),
+			last_error = $3,
+			lease_owner = NULL,
+			lease_expires_at = NULL,
+			updated_at = now()
+		WHERE id = $1
+		RETURNING run_at
+	`, task.ID, delay.Milliseconds(), message).Scan(&runAt); err != nil {
+		return fmt.Errorf("reschedule activity: %w", err)
+	}
+	data, err := json.Marshal(struct {
+		CommandSeq int       `json:"command_seq"`
+		Attempt    int       `json:"attempt"`
+		Error      string    `json:"error"`
+		NextRunAt  time.Time `json:"next_run_at"`
+	}{
+		CommandSeq: *task.CommandSeq,
+		Attempt:    task.Attempt + 1,
+		Error:      message,
+		NextRunAt:  runAt,
+	})
+	if err != nil {
+		return fmt.Errorf("encode activity retry: %w", err)
+	}
+	return appendEvents(ctx, tx, task.WorkflowID, NewEvent{Type: history.ActivityRetryScheduled, Data: data})
+}
+
+func loadRetryPolicy(ctx context.Context, tx pgx.Tx, workflowID string, seq int) (retryPolicy, error) {
+	var raw string
+	err := tx.QueryRow(ctx, `
+		SELECT data::text FROM workflow_events
+		WHERE workflow_id = $1 AND type = $2 AND data->>'command_seq' = $3
+		ORDER BY seq DESC
+		LIMIT 1
+	`, workflowID, history.ActivityScheduled, strconv.Itoa(seq)).Scan(&raw)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return retryPolicy{}, nil
+	}
+	if err != nil {
+		return retryPolicy{}, fmt.Errorf("load retry policy: %w", err)
+	}
+	var body struct {
+		RetryPolicy json.RawMessage `json:"retry_policy"`
+	}
+	if err := json.Unmarshal([]byte(raw), &body); err != nil {
+		return retryPolicy{}, fmt.Errorf("decode activity scheduled: %w", err)
+	}
+	if len(body.RetryPolicy) == 0 || string(body.RetryPolicy) == "null" {
+		return retryPolicy{}, nil
+	}
+	var policy retryPolicy
+	if err := json.Unmarshal(body.RetryPolicy, &policy); err != nil {
+		return retryPolicy{}, fmt.Errorf("decode retry policy: %w", err)
+	}
+	return policy, nil
 }
 
 func activityResultEvent(seq int, failed bool, result json.RawMessage, message string, nonRetryable bool) (NewEvent, error) {
@@ -326,28 +344,88 @@ func failWorkflow(ctx context.Context, tx pgx.Tx, workflowID, message string) er
 	return nil
 }
 
-type leasedTask struct {
-	WorkflowID string
-	Kind       string
-	CommandSeq *int
-	Dispatched *int
+type taskRow struct {
+	ID          int64
+	WorkflowID  string
+	Kind        string
+	CommandSeq  *int
+	Dispatched  *int
+	Status      string
+	LeaseToken  int64
+	Attempt     int
+	MaxAttempts int
 }
 
-func lockLeasedTask(ctx context.Context, tx pgx.Tx, taskID, leaseToken int64) (leasedTask, error) {
-	var task leasedTask
+func (s *Store) withLease(ctx context.Context, taskID, leaseToken int64, workerID string, fn func(pgx.Tx, taskRow) error) error {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin task completion: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
+	task, err := lockTask(ctx, tx, taskID)
+	if err != nil {
+		return err
+	}
+	if task.Status != "leased" || task.LeaseToken != leaseToken {
+		if err := appendStaleRejection(ctx, tx, task, workerID); err != nil {
+			return err
+		}
+		if err := tx.Commit(ctx); err != nil {
+			return fmt.Errorf("commit stale completion: %w", err)
+		}
+		return ErrLeaseMismatch
+	}
+	if err := fn(tx, task); err != nil {
+		return err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit task completion: %w", err)
+	}
+	return nil
+}
+
+func lockTask(ctx context.Context, tx pgx.Tx, taskID int64) (taskRow, error) {
+	var task taskRow
 	err := tx.QueryRow(ctx, `
-		SELECT workflow_id, kind, command_seq, history_len_at_dispatch
+		SELECT id, workflow_id, kind, command_seq, history_len_at_dispatch,
+		       status, lease_token, attempt, max_attempts
 		FROM tasks
-		WHERE id = $1 AND status = 'leased' AND lease_token = $2
+		WHERE id = $1
 		FOR UPDATE
-	`, taskID, leaseToken).Scan(&task.WorkflowID, &task.Kind, &task.CommandSeq, &task.Dispatched)
+	`, taskID).Scan(
+		&task.ID, &task.WorkflowID, &task.Kind, &task.CommandSeq, &task.Dispatched,
+		&task.Status, &task.LeaseToken, &task.Attempt, &task.MaxAttempts,
+	)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return leasedTask{}, ErrLeaseMismatch
+		return taskRow{}, ErrLeaseMismatch
 	}
 	if err != nil {
-		return leasedTask{}, fmt.Errorf("lock task: %w", err)
+		return taskRow{}, fmt.Errorf("lock task: %w", err)
 	}
 	return task, nil
+}
+
+func appendStaleRejection(ctx context.Context, tx pgx.Tx, task taskRow, workerID string) error {
+	seq := 0
+	if task.CommandSeq != nil {
+		seq = *task.CommandSeq
+	}
+	data, err := json.Marshal(struct {
+		CommandSeq int    `json:"command_seq"`
+		WorkerID   string `json:"worker_id"`
+	}{CommandSeq: seq, WorkerID: workerID})
+	if err != nil {
+		return fmt.Errorf("encode stale completion: %w", err)
+	}
+	return appendEvents(ctx, tx, task.WorkflowID, NewEvent{Type: history.StaleCompletionRejected, Data: data})
+}
+
+func setLastError(ctx context.Context, tx pgx.Tx, taskID int64, message string) error {
+	if _, err := tx.Exec(ctx, `UPDATE tasks SET last_error = $2, updated_at = now() WHERE id = $1`, taskID, message); err != nil {
+		return fmt.Errorf("record last error: %w", err)
+	}
+	return nil
 }
 
 type workflowRow struct {

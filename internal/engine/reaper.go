@@ -10,9 +10,13 @@ import (
 )
 
 // RunReaper returns expired task leases to the queue until ctx is cancelled.
-func RunReaper(ctx context.Context, st *store.Store, interval time.Duration) {
+// maxRedeliveries caps how many times an activity is queued again after a crash.
+func RunReaper(ctx context.Context, st *store.Store, interval time.Duration, maxRedeliveries int) {
 	if interval <= 0 {
 		interval = time.Second
+	}
+	if maxRedeliveries <= 0 {
+		maxRedeliveries = store.DefaultMaxRedeliveries
 	}
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
@@ -21,7 +25,7 @@ func RunReaper(ctx context.Context, st *store.Store, interval time.Duration) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			if _, err := st.ReapExpired(ctx, 100); err != nil && ctx.Err() == nil {
+			if _, err := st.ReapExpired(ctx, 100, maxRedeliveries); err != nil && ctx.Err() == nil {
 				slog.Error("reap expired tasks", "err", err)
 			}
 		}

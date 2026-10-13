@@ -8,9 +8,10 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/nigelnunes/durable-flow/internal/history"
 )
 
-const pollWaitSlice = 200 * time.Millisecond
+const pollWaitSlice = 20 * time.Millisecond
 
 // PolledWorkflow is the workflow snapshot returned with a workflow task.
 type PolledWorkflow struct {
@@ -281,13 +282,17 @@ func (s *Store) HeartbeatTask(ctx context.Context, taskID, leaseToken int64, lea
 // ReapExpired returns up to limit expired leases to the queue.
 // Each task is locked and reset in its own transaction, after the workflow row is locked.
 // The lease token is left unchanged so the next poll increases it.
-func (s *Store) ReapExpired(ctx context.Context, limit int) (int, error) {
+// An activity whose next redelivery would pass maxRedeliveries fails instead.
+func (s *Store) ReapExpired(ctx context.Context, limit, maxRedeliveries int) (int, error) {
 	if limit <= 0 {
 		limit = 100
 	}
+	if maxRedeliveries <= 0 {
+		maxRedeliveries = DefaultMaxRedeliveries
+	}
 	n := 0
 	for n < limit {
-		ok, err := s.reapOne(ctx)
+		ok, err := s.reapOne(ctx, maxRedeliveries)
 		if err != nil {
 			return n, err
 		}
@@ -299,24 +304,21 @@ func (s *Store) ReapExpired(ctx context.Context, limit int) (int, error) {
 	return n, nil
 }
 
-func (s *Store) reapOne(ctx context.Context) (bool, error) {
+func (s *Store) reapOne(ctx context.Context, maxRedeliveries int) (bool, error) {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return false, fmt.Errorf("begin reap: %w", err)
 	}
 	defer tx.Rollback(ctx)
 
-	var (
-		taskID     int64
-		workflowID string
-	)
+	var row expiredTask
 	err = tx.QueryRow(ctx, `
-		SELECT id, workflow_id
+		SELECT id, workflow_id, kind, command_seq, lease_owner, redeliveries
 		FROM tasks
 		WHERE status = 'leased' AND lease_expires_at < now()
 		FOR UPDATE SKIP LOCKED
 		LIMIT 1
-	`).Scan(&taskID, &workflowID)
+	`).Scan(&row.ID, &row.WorkflowID, &row.Kind, &row.CommandSeq, &row.Owner, &row.Redeliveries)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return false, nil
 	}
@@ -324,10 +326,65 @@ func (s *Store) reapOne(ctx context.Context) (bool, error) {
 		return false, fmt.Errorf("select expired task: %w", err)
 	}
 
-	var locked string
-	if err := tx.QueryRow(ctx, `SELECT id FROM workflows WHERE id = $1 FOR UPDATE`, workflowID).Scan(&locked); err != nil {
-		return false, fmt.Errorf("lock workflow: %w", err)
+	if _, err := lockWorkflow(ctx, tx, row.WorkflowID); err != nil {
+		return false, err
 	}
+	next := row.Redeliveries + 1
+	owner := ""
+	if row.Owner != nil {
+		owner = *row.Owner
+	}
+	if err := appendLeaseExpired(ctx, tx, row, owner, next); err != nil {
+		return false, err
+	}
+	poison := row.Kind == "activity" && next > maxRedeliveries
+	if poison {
+		if err := failRedeliveries(ctx, tx, row, next); err != nil {
+			return false, err
+		}
+	} else if err := requeueExpired(ctx, tx, row.ID); err != nil {
+		return false, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return false, fmt.Errorf("commit reap: %w", err)
+	}
+	return true, nil
+}
+
+type expiredTask struct {
+	ID           int64
+	WorkflowID   string
+	Kind         string
+	CommandSeq   *int
+	Owner        *string
+	Redeliveries int
+}
+
+func appendLeaseExpired(ctx context.Context, tx pgx.Tx, row expiredTask, owner string, redeliveries int) error {
+	if row.Kind == "workflow" {
+		data, err := json.Marshal(struct {
+			WorkerID string `json:"worker_id"`
+		}{WorkerID: owner})
+		if err != nil {
+			return fmt.Errorf("encode workflow lease expired: %w", err)
+		}
+		return appendEvents(ctx, tx, row.WorkflowID, NewEvent{Type: history.WorkflowTaskLeaseExpired, Data: data})
+	}
+	if row.CommandSeq == nil {
+		return fmt.Errorf("activity task %d missing command_seq", row.ID)
+	}
+	data, err := json.Marshal(struct {
+		CommandSeq   int    `json:"command_seq"`
+		WorkerID     string `json:"worker_id"`
+		Redeliveries int    `json:"redeliveries"`
+	}{CommandSeq: *row.CommandSeq, WorkerID: owner, Redeliveries: redeliveries})
+	if err != nil {
+		return fmt.Errorf("encode activity lease expired: %w", err)
+	}
+	return appendEvents(ctx, tx, row.WorkflowID, NewEvent{Type: history.ActivityLeaseExpired, Data: data})
+}
+
+func requeueExpired(ctx context.Context, tx pgx.Tx, taskID int64) error {
 	tag, err := tx.Exec(ctx, `
 		UPDATE tasks SET
 			status = 'pending',
@@ -339,15 +396,49 @@ func (s *Store) reapOne(ctx context.Context) (bool, error) {
 		WHERE id = $1 AND status = 'leased'
 	`, taskID)
 	if err != nil {
-		return false, fmt.Errorf("reset expired task: %w", err)
+		return fmt.Errorf("reset expired task: %w", err)
 	}
 	if tag.RowsAffected() == 0 {
-		return false, nil
+		return fmt.Errorf("reset expired task: task %d was not leased", taskID)
 	}
-	if err := tx.Commit(ctx); err != nil {
-		return false, fmt.Errorf("commit reap: %w", err)
+	return nil
+}
+
+func failRedeliveries(ctx context.Context, tx pgx.Tx, row expiredTask, redeliveries int) error {
+	if row.CommandSeq == nil {
+		return fmt.Errorf("activity task %d missing command_seq", row.ID)
 	}
-	return true, nil
+	event, err := activityResultEvent(*row.CommandSeq, true, nil, history.TooManyRedeliveries, true)
+	if err != nil {
+		return err
+	}
+	if err := appendEvents(ctx, tx, row.WorkflowID, event); err != nil {
+		return err
+	}
+	tag, err := tx.Exec(ctx, `
+		UPDATE tasks SET
+			status = 'done',
+			redeliveries = $2,
+			lease_owner = NULL,
+			lease_expires_at = NULL,
+			last_error = $3,
+			updated_at = now()
+		WHERE id = $1 AND status = 'leased'
+	`, row.ID, redeliveries, history.TooManyRedeliveries)
+	if err != nil {
+		return fmt.Errorf("fail redelivered activity: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("fail redelivered activity: task %d was not leased", row.ID)
+	}
+	state, err := lockWorkflow(ctx, tx, row.WorkflowID)
+	if err != nil {
+		return err
+	}
+	if state.Status != "running" {
+		return nil
+	}
+	return enqueueWorkflowTask(ctx, tx, row.WorkflowID)
 }
 
 func sleepUntil(ctx context.Context, deadline time.Time) error {

@@ -22,22 +22,26 @@ type commandBody struct {
 
 type completeWorkflowBody struct {
 	LeaseToken int64         `json:"lease_token"`
+	WorkerID   string        `json:"worker_id"`
 	Commands   []commandBody `json:"commands"`
 }
 
 type completeActivityBody struct {
 	LeaseToken int64           `json:"lease_token"`
+	WorkerID   string          `json:"worker_id"`
 	Result     json.RawMessage `json:"result"`
 }
 
 type failActivityBody struct {
 	LeaseToken   int64  `json:"lease_token"`
+	WorkerID     string `json:"worker_id"`
 	Error        string `json:"error"`
 	NonRetryable bool   `json:"non_retryable"`
 }
 
 type failWorkflowBody struct {
 	LeaseToken     int64  `json:"lease_token"`
+	WorkerID       string `json:"worker_id"`
 	Error          string `json:"error"`
 	NonDeterminism bool   `json:"non_determinism"`
 }
@@ -68,7 +72,7 @@ func (s *server) completeWorkflowTask(w http.ResponseWriter, r *http.Request) {
 			Error:       cmd.Error,
 		})
 	}
-	err := s.store.CompleteWorkflowTask(r.Context(), taskID, req.LeaseToken, commands)
+	err := s.store.CompleteWorkflowTask(r.Context(), taskID, req.LeaseToken, req.WorkerID, commands)
 	if writeCompleteErr(w, "complete workflow task", err) {
 		return
 	}
@@ -88,7 +92,7 @@ func (s *server) completeActivityTask(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "bad_request", "result JSON is invalid")
 		return
 	}
-	err := s.store.CompleteActivityTask(r.Context(), taskID, req.LeaseToken, req.Result)
+	err := s.store.CompleteActivityTask(r.Context(), taskID, req.LeaseToken, req.WorkerID, req.Result)
 	if writeCompleteErr(w, "complete activity", err) {
 		return
 	}
@@ -104,7 +108,7 @@ func (s *server) failActivityTask(w http.ResponseWriter, r *http.Request) {
 	if !decodeBody(w, r, &req) {
 		return
 	}
-	err := s.store.FailActivityTask(r.Context(), taskID, req.LeaseToken, req.Error, req.NonRetryable)
+	err := s.store.FailActivityTask(r.Context(), taskID, req.LeaseToken, req.WorkerID, req.Error, req.NonRetryable)
 	if writeCompleteErr(w, "fail activity", err) {
 		return
 	}
@@ -120,7 +124,7 @@ func (s *server) failWorkflowTask(w http.ResponseWriter, r *http.Request) {
 	if !decodeBody(w, r, &req) {
 		return
 	}
-	err := s.store.FailWorkflowTask(r.Context(), taskID, req.LeaseToken, req.Error, req.NonDeterminism)
+	err := s.store.FailWorkflowTask(r.Context(), taskID, req.LeaseToken, req.WorkerID, req.Error, req.NonDeterminism)
 	if writeCompleteErr(w, "fail workflow task", err) {
 		return
 	}

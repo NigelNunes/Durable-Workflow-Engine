@@ -8,8 +8,13 @@ const (
 	ActivityFailed           = "ActivityFailed"
 	WorkflowCompleted        = "WorkflowCompleted"
 	WorkflowFailed           = "WorkflowFailed"
+	ActivityRetryScheduled   = "ActivityRetryScheduled"
 	ActivityLeaseExpired     = "ActivityLeaseExpired"
 	WorkflowTaskLeaseExpired = "WorkflowTaskLeaseExpired"
+	StaleCompletionRejected  = "StaleCompletionRejected"
+
+	// TooManyRedeliveries is the terminal activity error after the redelivery cap.
+	TooManyRedeliveries = "TooManyRedeliveries"
 
 	CmdScheduleActivity = "ScheduleActivity"
 	CmdStartTimer       = "StartTimer"

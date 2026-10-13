@@ -50,6 +50,15 @@ func (e *ApplicationError) Error() string {
 	return e.Message
 }
 
+// NonRetryable marks err as a terminal activity failure.
+// The engine does not schedule another attempt.
+func NonRetryable(err error) error {
+	if err == nil {
+		return nil
+	}
+	return &ApplicationError{Message: err.Error(), NonRetryable: true}
+}
+
 // Command is one instruction emitted by a workflow task.
 type Command interface {
 	isCommand()
