@@ -22,17 +22,29 @@ type Options struct {
 	EngineURL               string
 	DemoKey                 string
 	MaxConcurrentActivities int
+	// PauseHeartbeats, when non-nil and true, stops worker and activity
+	// heartbeats and stops the poll loop from leasing more tasks.
+	// The activity already running can still finish.
+	// Chaos tests use it so a live process can lose its lease.
+	// Normal workers leave it nil.
+	PauseHeartbeats func() bool
+	// BeforeWorkflowReplay runs after a workflow task is leased and before replay.
+	// Chaos tests block here so the process can be killed mid task.
+	// Normal workers leave it nil.
+	BeforeWorkflowReplay func(workflowID string)
 }
 
 // Worker executes registered workflows and activities.
 type Worker struct {
-	name           string
-	maxActivities  int
-	http           *engineClient
-	workflows      map[string]workflowFunc
-	activities     map[string]activityFunc
-	workerID       string
-	heartbeatEvery time.Duration
+	name                 string
+	maxActivities        int
+	http                 *engineClient
+	workflows            map[string]workflowFunc
+	activities           map[string]activityFunc
+	workerID             string
+	heartbeatEvery       time.Duration
+	pauseHeartbeats      func() bool
+	beforeWorkflowReplay func(string)
 }
 
 type polledTask struct {
@@ -77,9 +89,15 @@ func New(opts Options) *Worker {
 			key:  opts.DemoKey,
 			http: &http.Client{},
 		},
-		workflows:  map[string]workflowFunc{},
-		activities: map[string]activityFunc{},
+		workflows:            map[string]workflowFunc{},
+		activities:           map[string]activityFunc{},
+		pauseHeartbeats:      opts.PauseHeartbeats,
+		beforeWorkflowReplay: opts.BeforeWorkflowReplay,
 	}
+}
+
+func (w *Worker) heartbeatsPaused() bool {
+	return w.pauseHeartbeats != nil && w.pauseHeartbeats()
 }
 
 func trimSlash(s string) string {
@@ -155,6 +173,12 @@ func (w *Worker) Run(ctx context.Context) error {
 		if len(sem) >= w.maxActivities {
 			kinds = []string{"workflow"}
 		}
+		if w.heartbeatsPaused() {
+			if !sleep(runCtx, 50*time.Millisecond) {
+				break
+			}
+			continue
+		}
 		task, ok, err := w.poll(runCtx, kinds)
 		if err != nil {
 			if runCtx.Err() != nil {
@@ -199,6 +223,9 @@ func (w *Worker) heartbeatWorker(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
+			if w.heartbeatsPaused() {
+				continue
+			}
 			var chaos any
 			_, _ = w.http.post(ctx, "/v1/workers/"+w.workerID+"/heartbeat", map[string]any{}, &chaos)
 		}
@@ -231,6 +258,9 @@ func (w *Worker) handleWorkflow(ctx context.Context, task polledTask) {
 	if !ok {
 		w.failWorkflow(ctx, task, "workflow not registered: "+task.Workflow.Type, false)
 		return
+	}
+	if w.beforeWorkflowReplay != nil {
+		w.beforeWorkflowReplay(task.Workflow.ID)
 	}
 	commands, failure := fn(task.Workflow.ID, task.Workflow.Input, task.History)
 	if failure != nil {
@@ -317,6 +347,9 @@ func (w *Worker) heartbeatActivity(ctx context.Context, task polledTask, leaseLo
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
+			if w.heartbeatsPaused() {
+				continue
+			}
 			status, err := w.http.post(ctx, fmt.Sprintf("/v1/tasks/%d/heartbeat", task.TaskID), map[string]any{
 				"lease_token": task.LeaseToken,
 			}, nil)
