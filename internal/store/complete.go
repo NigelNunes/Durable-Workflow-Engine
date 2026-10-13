@@ -23,6 +23,7 @@ type WorkflowCommand struct {
 	MaxAttempts int
 	Result      json.RawMessage
 	Error       string
+	FireAt      time.Time
 }
 
 // CompleteWorkflowTask applies commands when the workflow history still matches
@@ -111,7 +112,9 @@ func checkCommands(commands []WorkflowCommand) error {
 			}
 		case history.CmdCompleteWorkflow, history.CmdFailWorkflow:
 		case history.CmdStartTimer:
-			return fmt.Errorf("%w: StartTimer", ErrUnsupportedCommand)
+			if cmd.Seq < 1 || cmd.FireAt.IsZero() {
+				return fmt.Errorf("%w: start timer needs a seq and a fire_at", ErrBadCommand)
+			}
 		default:
 			return fmt.Errorf("%w: %s", ErrUnsupportedCommand, cmd.Type)
 		}
@@ -258,9 +261,32 @@ func applyWorkflowCommand(ctx context.Context, tx pgx.Tx, workflowID string, cmd
 		return completeWorkflow(ctx, tx, workflowID, cmd.Result)
 	case history.CmdFailWorkflow:
 		return failWorkflowCommand(ctx, tx, workflowID, cmd.Error)
+	case history.CmdStartTimer:
+		return startTimer(ctx, tx, workflowID, cmd)
 	default:
 		return fmt.Errorf("%w: %s", ErrUnsupportedCommand, cmd.Type)
 	}
+}
+
+func startTimer(ctx context.Context, tx pgx.Tx, workflowID string, cmd WorkflowCommand) error {
+	fireAt := cmd.FireAt.UTC()
+	data, err := json.Marshal(struct {
+		CommandSeq int       `json:"command_seq"`
+		FireAt     time.Time `json:"fire_at"`
+	}{CommandSeq: cmd.Seq, FireAt: fireAt})
+	if err != nil {
+		return fmt.Errorf("encode timer started: %w", err)
+	}
+	if err := appendEvents(ctx, tx, workflowID, NewEvent{Type: history.TimerStarted, Data: data}); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO timers (workflow_id, command_seq, fire_at)
+		VALUES ($1, $2, $3)
+	`, workflowID, cmd.Seq, fireAt); err != nil {
+		return fmt.Errorf("insert timer: %w", err)
+	}
+	return nil
 }
 
 func scheduleActivity(ctx context.Context, tx pgx.Tx, workflowID string, cmd WorkflowCommand) error {

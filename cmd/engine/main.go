@@ -52,6 +52,10 @@ func run() error {
 	if err != nil {
 		return err
 	}
+	schedulerInterval, err := envDuration("SCHEDULER_INTERVAL", 500*time.Millisecond)
+	if err != nil {
+		return err
+	}
 
 	ctx := context.Background()
 	if _, err := store.Migrate(ctx, databaseURL, migrations.FS); err != nil {
@@ -66,6 +70,7 @@ func run() error {
 	reapCtx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	go engine.RunReaper(reapCtx, st, reaperInterval, maxRedeliveries)
+	go engine.RunScheduler(reapCtx, st, schedulerInterval)
 
 	srv := &http.Server{
 		Addr: ":" + port,

@@ -226,6 +226,12 @@ func newQueueServer(t *testing.T, leaseTTL time.Duration, maxConns int32, reaper
 
 func startQueueServer(t *testing.T, leaseTTL time.Duration, maxConns int32, reaperEvery time.Duration, maxRedeliveries int) *httptest.Server {
 	t.Helper()
+	srv, _ := openEngine(t, leaseTTL, maxConns, reaperEvery, maxRedeliveries)
+	return srv
+}
+
+func openEngine(t *testing.T, leaseTTL time.Duration, maxConns int32, reaperEvery time.Duration, maxRedeliveries int) (*httptest.Server, *store.Store) {
+	t.Helper()
 	resetQueue(t)
 	st, err := store.Open(context.Background(), dbURL, store.Config{MaxConns: maxConns})
 	if err != nil {
@@ -243,7 +249,7 @@ func startQueueServer(t *testing.T, leaseTTL time.Duration, maxConns int32, reap
 		HeartbeatInterval: time.Second,
 	}))
 	t.Cleanup(srv.Close)
-	return srv
+	return srv, st
 }
 
 func resetQueue(t *testing.T) {

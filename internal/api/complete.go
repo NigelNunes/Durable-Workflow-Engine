@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"net/http"
 	"strconv"
+	"time"
 
 	"github.com/nigelnunes/durable-flow/internal/store"
 )
@@ -18,6 +19,7 @@ type commandBody struct {
 	RetryPolicy json.RawMessage `json:"retry_policy"`
 	Result      json.RawMessage `json:"result"`
 	Error       string          `json:"error"`
+	FireAt      time.Time       `json:"fire_at"`
 }
 
 type completeWorkflowBody struct {
@@ -70,6 +72,7 @@ func (s *server) completeWorkflowTask(w http.ResponseWriter, r *http.Request) {
 			MaxAttempts: maxAttempts(cmd.RetryPolicy),
 			Result:      cmd.Result,
 			Error:       cmd.Error,
+			FireAt:      cmd.FireAt,
 		})
 	}
 	err := s.store.CompleteWorkflowTask(r.Context(), taskID, req.LeaseToken, req.WorkerID, commands)

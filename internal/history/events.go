@@ -8,6 +8,8 @@ const (
 	ActivityFailed           = "ActivityFailed"
 	WorkflowCompleted        = "WorkflowCompleted"
 	WorkflowFailed           = "WorkflowFailed"
+	TimerStarted             = "TimerStarted"
+	TimerFired               = "TimerFired"
 	ActivityRetryScheduled   = "ActivityRetryScheduled"
 	ActivityLeaseExpired     = "ActivityLeaseExpired"
 	WorkflowTaskLeaseExpired = "WorkflowTaskLeaseExpired"
