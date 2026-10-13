@@ -17,5 +17,96 @@ services:
       timeout: 5s
       retries: 20
 
+  engine:
+    profiles: ["demo"]
+    build:
+      context: .
+      dockerfile: cmd/engine/Dockerfile
+    environment:
+      DATABASE_URL: postgres://durable:durable@postgres:5432/durable?sslmode=disable
+      DEMO_KEY: dev-demo-key
+      PORT: "8080"
+    ports:
+      - "8080:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8080/healthz"]
+      interval: 2s
+      timeout: 3s
+      retries: 20
+
+  demo-services:
+    profiles: ["demo"]
+    build:
+      context: .
+      dockerfile: cmd/demo-services/Dockerfile
+    environment:
+      DATABASE_URL: postgres://durable:durable@postgres:5432/durable?sslmode=disable
+      PORT: "8081"
+      LATENCY: 200ms
+    ports:
+      - "8081:8081"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8081/healthz"]
+      interval: 2s
+      timeout: 3s
+      retries: 20
+
+  demo-worker-1:
+    profiles: ["demo"]
+    build:
+      context: .
+      dockerfile: cmd/demo-worker/Dockerfile
+    environment:
+      ENGINE_URL: http://engine:8080
+      DEMO_KEY: dev-demo-key
+      SERVICES_URL: http://demo-services:8081
+      WORKER_NAME: demo-worker-1
+    restart: unless-stopped
+    depends_on:
+      engine:
+        condition: service_healthy
+      demo-services:
+        condition: service_healthy
+
+  demo-worker-2:
+    profiles: ["demo"]
+    build:
+      context: .
+      dockerfile: cmd/demo-worker/Dockerfile
+    environment:
+      ENGINE_URL: http://engine:8080
+      DEMO_KEY: dev-demo-key
+      SERVICES_URL: http://demo-services:8081
+      WORKER_NAME: demo-worker-2
+    restart: unless-stopped
+    depends_on:
+      engine:
+        condition: service_healthy
+      demo-services:
+        condition: service_healthy
+
+  demo-worker-3:
+    profiles: ["demo"]
+    build:
+      context: .
+      dockerfile: cmd/demo-worker/Dockerfile
+    environment:
+      ENGINE_URL: http://engine:8080
+      DEMO_KEY: dev-demo-key
+      SERVICES_URL: http://demo-services:8081
+      WORKER_NAME: demo-worker-3
+    restart: unless-stopped
+    depends_on:
+      engine:
+        condition: service_healthy
+      demo-services:
+        condition: service_healthy
+
 volumes:
   pgdata: {}

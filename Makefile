@@ -1,4 +1,4 @@
-.PHONY: up down migrate test lint
+.PHONY: up down migrate test lint demo
 
 DATABASE_URL ?= postgres://durable:durable@localhost:5433/durable?sslmode=disable
 
@@ -16,3 +16,6 @@ test:
 
 lint:
 	go vet ./...
+
+demo:
+	docker compose --profile demo up -d --build --wait
