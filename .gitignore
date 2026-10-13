@@ -10,3 +10,6 @@
 
 # OS / editor
 .DS_Store
+
+# Local phase explanations
+phase-notes.md

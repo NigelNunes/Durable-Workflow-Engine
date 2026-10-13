@@ -1,0 +1,15 @@
+---
+description: After each phase, write the full explanation into phase-notes.md
+alwaysApply: true
+---
+
+# Phase notes
+
+After a phase's acceptance criteria pass, append that phase to `phase-notes.md` in the repo root before starting the next phase.
+
+- Cite the plan filename for that phase.
+- Copy the full explanation from the plan: what the phase teaches, every diagram, the SQL or algorithms, the files and APIs, the tests, and the failure cases. Do not shorten it to a summary.
+- Keep mermaid diagrams in fenced `mermaid` blocks so they still render.
+- Add what the finished code actually proved, including commands and results that differed from the plan.
+- Add a `## Phase N: title` section. Do not rewrite earlier sections unless a later phase changed their meaning.
+- Leave the file listed in `.gitignore`. Do not commit it.
