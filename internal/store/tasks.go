@@ -171,6 +171,11 @@ func (s *Store) tryPoll(ctx context.Context, workerID string, kinds []string, le
 		if err != nil {
 			return PolledTask{}, false, err
 		}
+		if _, err := tx.Exec(ctx, `
+			UPDATE tasks SET history_len_at_dispatch = $2 WHERE id = $1
+		`, row.ID, historyLen); err != nil {
+			return PolledTask{}, false, fmt.Errorf("record history_len_at_dispatch: %w", err)
+		}
 		task.Workflow = wf
 		task.History = events
 		task.HistoryLen = historyLen
@@ -220,7 +225,7 @@ func loadWorkflowPoll(ctx context.Context, tx pgx.Tx, workflowID string) (Polled
 		historyLen int
 	)
 	err := tx.QueryRow(ctx, `
-		SELECT id, type, input::text, history_len FROM workflows WHERE id = $1
+		SELECT id, type, input::text, history_len FROM workflows WHERE id = $1 FOR UPDATE
 	`, workflowID).Scan(&wf.ID, &wf.Type, &input, &historyLen)
 	if err != nil {
 		return PolledWorkflow{}, nil, 0, fmt.Errorf("load polled workflow: %w", err)

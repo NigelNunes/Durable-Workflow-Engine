@@ -89,7 +89,8 @@ func (FailWorkflow) isCommand() {}
 
 // Failure is a problem with the workflow task itself.
 // NonDeterminism means the code no longer matches history.
-// Other failures are task failures: the workflow is not failed.
+// The runner reports these instead of emitting FailWorkflow.
+// A worker sends them to fail-workflow so the workflow stops.
 type Failure struct {
 	Message        string
 	NonDeterminism bool
@@ -104,10 +105,10 @@ func (f *Failure) Error() string {
 
 // HistoryEvent is one recorded event. Informational events are ignored.
 type HistoryEvent struct {
-	Seq       int
-	Type      string
-	Data      json.RawMessage
-	CreatedAt time.Time
+	Seq       int             `json:"seq"`
+	Type      string          `json:"type"`
+	Data      json.RawMessage `json:"data"`
+	CreatedAt time.Time       `json:"created_at"`
 }
 
 // Option configures one run of a workflow task.

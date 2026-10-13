@@ -40,6 +40,10 @@ func NewHandler(st *store.Store, cfg Config) http.Handler {
 	mux.HandleFunc("POST /v1/workers/{id}/heartbeat", s.heartbeatWorker)
 	mux.HandleFunc("POST /v1/tasks/poll", s.pollTasks)
 	mux.HandleFunc("POST /v1/tasks/{id}/heartbeat", s.heartbeatTask)
+	mux.HandleFunc("POST /v1/tasks/{id}/complete-workflow", s.completeWorkflowTask)
+	mux.HandleFunc("POST /v1/tasks/{id}/complete-activity", s.completeActivityTask)
+	mux.HandleFunc("POST /v1/tasks/{id}/fail-activity", s.failActivityTask)
+	mux.HandleFunc("POST /v1/tasks/{id}/fail-workflow", s.failWorkflowTask)
 	return requireDemoKey(cfg.DemoKey, mux)
 }
 

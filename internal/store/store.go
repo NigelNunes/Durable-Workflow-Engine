@@ -13,8 +13,12 @@ var (
 	ErrNotFound = errors.New("workflow not found")
 	// ErrWorkerNotFound is returned when a worker id is not registered.
 	ErrWorkerNotFound = errors.New("worker not found")
-	// ErrLeaseMismatch is returned when a task heartbeat presents a stale token.
+	// ErrLeaseMismatch is returned when a task heartbeat or completion presents a stale token.
 	ErrLeaseMismatch = errors.New("lease token mismatch")
+	// ErrBadCommand is returned when a completion command is missing required fields.
+	ErrBadCommand = errors.New("bad command")
+	// ErrUnsupportedCommand is returned when a command is not accepted yet.
+	ErrUnsupportedCommand = errors.New("unsupported command")
 )
 
 // Config tunes the connection pool. Zero values keep the pgx defaults.
