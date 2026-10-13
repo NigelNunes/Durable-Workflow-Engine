@@ -8,8 +8,19 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-// ErrNotFound is returned when a workflow id does not exist.
-var ErrNotFound = errors.New("workflow not found")
+var (
+	// ErrNotFound is returned when a workflow id does not exist.
+	ErrNotFound = errors.New("workflow not found")
+	// ErrWorkerNotFound is returned when a worker id is not registered.
+	ErrWorkerNotFound = errors.New("worker not found")
+	// ErrLeaseMismatch is returned when a task heartbeat presents a stale token.
+	ErrLeaseMismatch = errors.New("lease token mismatch")
+)
+
+// Config tunes the connection pool. Zero values keep the pgx defaults.
+type Config struct {
+	MaxConns int32
+}
 
 // Store talks to the engine tables in Postgres.
 type Store struct {
@@ -18,7 +29,19 @@ type Store struct {
 
 // New opens a connection pool. The caller must Close it.
 func New(ctx context.Context, databaseURL string) (*Store, error) {
-	pool, err := pgxpool.New(ctx, databaseURL)
+	return Open(ctx, databaseURL, Config{})
+}
+
+// Open opens a connection pool with cfg. The caller must Close it.
+func Open(ctx context.Context, databaseURL string, cfg Config) (*Store, error) {
+	poolCfg, err := pgxpool.ParseConfig(databaseURL)
+	if err != nil {
+		return nil, fmt.Errorf("parse database url: %w", err)
+	}
+	if cfg.MaxConns > 0 {
+		poolCfg.MaxConns = cfg.MaxConns
+	}
+	pool, err := pgxpool.NewWithConfig(ctx, poolCfg)
 	if err != nil {
 		return nil, fmt.Errorf("connect: %w", err)
 	}

@@ -221,7 +221,7 @@ func newAPI(t *testing.T) *httptest.Server {
 		t.Fatal(err)
 	}
 	t.Cleanup(st.Close)
-	srv := httptest.NewServer(api.NewHandler(st, demoKey))
+	srv := httptest.NewServer(api.NewHandler(st, api.Config{DemoKey: demoKey}))
 	t.Cleanup(srv.Close)
 	return srv
 }
