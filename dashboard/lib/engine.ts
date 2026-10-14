@@ -34,3 +34,7 @@ export async function engineFetch(path: string, init: RequestInit & { admin?: bo
 export async function readJSON<T>(res: Response): Promise<T> {
   return (await res.json()) as T;
 }
+
+export function unavailable(): Response {
+  return Response.json({ error: "demo engine is not running", code: "unavailable" }, { status: 503 });
+}

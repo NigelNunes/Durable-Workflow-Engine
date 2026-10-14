@@ -8,9 +8,22 @@ export function messageFor(code?: string): string {
       return "Too many starts. Wait a moment.";
     case "too_many_workflows":
       return "Too many workflows are already running.";
+    case "unavailable":
+      return "The demo engine is not running.";
     default:
       return "Something went wrong.";
   }
+}
+
+const typeLabels: Record<string, string> = {
+  order_fulfilment: "Order",
+  user_onboarding: "Onboarding",
+  money_transfer: "Transfer",
+  report_pipeline: "Report",
+};
+
+export function typeLabel(type: string): string {
+  return typeLabels[type] ?? type;
 }
 
 export function formatRecovery(ms: number): string {

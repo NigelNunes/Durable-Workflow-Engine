@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { useEffect, useState } from "react";
-import { relativeTime } from "@/lib/messages";
+import { relativeTime, typeLabel } from "@/lib/messages";
 import type { HistoryEvent, WorkflowDetail } from "@/lib/types";
 
 const labels: Record<string, string> = {
@@ -63,31 +63,53 @@ export function Timeline({ id }: { id: string }) {
 
   useEffect(() => {
     let cancelled = false;
+    let finished = false;
     async function load() {
-      const [workflowRes, eventsRes] = await Promise.all([
-        fetch(`/api/workflows/${encodeURIComponent(id)}`, { cache: "no-store" }),
-        fetch(`/api/workflows/${encodeURIComponent(id)}/events`, { cache: "no-store" }),
-      ]);
-      if (cancelled) {
-        return;
+      try {
+        const [workflowRes, eventsRes] = await Promise.all([
+          fetch(`/api/workflows/${encodeURIComponent(id)}`, { cache: "no-store" }),
+          fetch(`/api/workflows/${encodeURIComponent(id)}/events`, { cache: "no-store" }),
+        ]);
+        if (cancelled) {
+          return;
+        }
+        if (!workflowRes.ok || !eventsRes.ok) {
+          setError("This workflow could not be loaded.");
+          return;
+        }
+        const next = (await workflowRes.json()) as WorkflowDetail;
+        const history = (await eventsRes.json()) as HistoryEvent[];
+        if (cancelled) {
+          return;
+        }
+        setError("");
+        setWorkflow(next);
+        setEvents(Array.isArray(history) ? history : []);
+        if (next.status === "completed" || next.status === "failed") {
+          finished = true;
+        }
+      } catch {
+        if (!cancelled) {
+          setError("This workflow could not be loaded.");
+        }
       }
-      if (!workflowRes.ok || !eventsRes.ok) {
-        setError("This workflow could not be loaded.");
-        return;
-      }
-      setWorkflow((await workflowRes.json()) as WorkflowDetail);
-      const history = (await eventsRes.json()) as HistoryEvent[];
-      setEvents(Array.isArray(history) ? history : []);
     }
     void load();
+    const poll = window.setInterval(() => {
+      if (finished || document.hidden) {
+        return;
+      }
+      void load();
+    }, 1000);
     return () => {
       cancelled = true;
+      window.clearInterval(poll);
     };
   }, [id]);
 
   const span = recoverySpan(events);
-  const rows = events.map((event, index) => {
-    const row = (
+  function eventRow(event: HistoryEvent) {
+    return (
       <article className={`event ${tone(event.type)}`} key={event.seq}>
         <header>
           <strong>{labels[event.type] ?? event.type}</strong>
@@ -96,52 +118,32 @@ export function Timeline({ id }: { id: string }) {
         <div className="muted">{fields(event.data ?? {})}</div>
       </article>
     );
-    if (!span || index < span.start || index > span.end) {
-      return row;
-    }
-    if (index === span.start) {
-      return (
-        <div className="recover" key={`recover-${event.seq}`}>
-          <div className="muted">{span.label}</div>
-          {row}
-        </div>
-      );
-    }
-    return row;
-  });
+  }
 
   const grouped = span
     ? [
-        ...rows.slice(0, span.start),
+        ...events.slice(0, span.start).map(eventRow),
         <div className="recover" key="recover">
           <div className="muted">{span.label}</div>
-          {events.slice(span.start, span.end + 1).map((event) => (
-            <article className={`event ${tone(event.type)}`} key={event.seq}>
-              <header>
-                <strong>{labels[event.type] ?? event.type}</strong>
-                <span className="muted">{relativeTime(event.created_at)}</span>
-              </header>
-              <div className="muted">{fields(event.data ?? {})}</div>
-            </article>
-          ))}
+          {events.slice(span.start, span.end + 1).map(eventRow)}
         </div>,
-        ...rows.slice(span.end + 1),
+        ...events.slice(span.end + 1).map(eventRow),
       ]
-    : rows;
+    : events.map(eventRow);
 
   const result = workflow?.result ? JSON.stringify(workflow.result) : "";
 
   return (
     <main>
-      <p>
-        <Link href="/">Back to the demo</Link>
+      <p className="back">
+        <Link href="/demo">Back to the demo</Link>
       </p>
       {error ? <p className="notice">{error}</p> : null}
       {workflow ? (
-        <header className="card">
+        <header className="summary">
           <strong>{workflow.id}</strong>
           <div className="muted">
-            {workflow.type} · {workflow.status}
+            {typeLabel(workflow.type)} · {workflow.status}
           </div>
           {result ? <div>Result {result}</div> : null}
           {workflow.error ? <div>Error {workflow.error}</div> : null}

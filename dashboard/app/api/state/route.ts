@@ -1,4 +1,4 @@
-import { engineFetch, readJSON, servicesURL } from "@/lib/engine";
+import { engineFetch, readJSON, servicesURL, unavailable } from "@/lib/engine";
 import type { Counters, DemoState, WorkerRow, WorkflowRow } from "@/lib/types";
 
 export const dynamic = "force-dynamic";
@@ -16,11 +16,20 @@ type ChargeStats = {
 };
 
 export async function GET() {
-  const [engineRes, statsRes, failRes] = await Promise.all([
-    engineFetch("/v1/dashboard/state"),
-    fetch(servicesURL("/stats"), { cache: "no-store" }),
-    fetch(servicesURL("/admin/payments/fail"), { cache: "no-store" }),
-  ]);
+  let engineRes: Response;
+  let statsRes: Response;
+  let failRes: Response;
+  let creditRes: Response;
+  try {
+    [engineRes, statsRes, failRes, creditRes] = await Promise.all([
+      engineFetch("/v1/dashboard/state"),
+      fetch(servicesURL("/stats"), { cache: "no-store" }),
+      fetch(servicesURL("/admin/payments/fail"), { cache: "no-store" }),
+      fetch(servicesURL("/admin/credit/fail"), { cache: "no-store" }),
+    ]);
+  } catch {
+    return unavailable();
+  }
   if (!engineRes.ok) {
     const body = await engineRes.json().catch(() => ({ error: "engine unavailable" }));
     return Response.json(body, { status: engineRes.status });
@@ -35,6 +44,11 @@ export async function GET() {
     const fail = await readJSON<{ enabled: boolean }>(failRes);
     paymentsFailing = fail.enabled;
   }
+  let creditFailing = false;
+  if (creditRes.ok) {
+    const fail = await readJSON<{ enabled: boolean }>(creditRes);
+    creditFailing = fail.enabled;
+  }
   const state: DemoState = {
     workers: engine.workers ?? [],
     workflows: engine.workflows ?? [],
@@ -43,6 +57,7 @@ export async function GET() {
     duplicate_requests_blocked: stats.duplicate_requests_blocked,
     total_charges: stats.total_charges,
     payments_failing: paymentsFailing,
+    credit_failing: creditFailing,
   };
   return Response.json(state);
 }
