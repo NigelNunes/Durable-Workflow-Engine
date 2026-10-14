@@ -8,6 +8,9 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"os"
+	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -45,6 +48,10 @@ type Worker struct {
 	heartbeatEvery       time.Duration
 	pauseHeartbeats      func() bool
 	beforeWorkflowReplay func(string)
+	exit                 func(int)
+	internalPause        atomic.Bool
+	stallMu              sync.Mutex
+	stallUntil           time.Time
 }
 
 type polledTask struct {
@@ -93,10 +100,14 @@ func New(opts Options) *Worker {
 		activities:           map[string]activityFunc{},
 		pauseHeartbeats:      opts.PauseHeartbeats,
 		beforeWorkflowReplay: opts.BeforeWorkflowReplay,
+		exit:                 os.Exit,
 	}
 }
 
 func (w *Worker) heartbeatsPaused() bool {
+	if w.internalPause.Load() {
+		return true
+	}
 	return w.pauseHeartbeats != nil && w.pauseHeartbeats()
 }
 
@@ -226,8 +237,15 @@ func (w *Worker) heartbeatWorker(ctx context.Context) {
 			if w.heartbeatsPaused() {
 				continue
 			}
-			var chaos any
-			_, _ = w.http.post(ctx, "/v1/workers/"+w.workerID+"/heartbeat", map[string]any{}, &chaos)
+			var body struct {
+				Chaos *string `json:"chaos"`
+			}
+			if _, err := w.http.post(ctx, "/v1/workers/"+w.workerID+"/heartbeat", map[string]any{}, &body); err != nil {
+				continue
+			}
+			if body.Chaos != nil && *body.Chaos != "" {
+				w.applyChaos(*body.Chaos)
+			}
 		}
 	}
 }
@@ -315,6 +333,10 @@ func (w *Worker) handleActivity(ctx context.Context, task polledTask) {
 	hbCancel()
 	hb.Wait()
 	if leaseLost.Load() {
+		return
+	}
+	w.waitStall()
+	if ctx.Err() != nil {
 		return
 	}
 	if err != nil {
@@ -467,5 +489,50 @@ func retryFrom(p workflow.RetryPolicy) wireRetry {
 		InitialIntervalMS: p.InitialInterval.Milliseconds(),
 		Backoff:           p.BackoffCoefficient,
 		MaxIntervalMS:     p.MaxInterval.Milliseconds(),
+	}
+}
+
+func (w *Worker) applyChaos(chaos string) {
+	if chaos == "crash" {
+		w.exit(137)
+		return
+	}
+	secs, ok := stallSeconds(chaos)
+	if !ok {
+		return
+	}
+	until := time.Now().Add(time.Duration(secs) * time.Second)
+	w.stallMu.Lock()
+	if until.After(w.stallUntil) {
+		w.stallUntil = until
+	}
+	w.stallMu.Unlock()
+	w.internalPause.Store(true)
+	if secs == 0 {
+		return
+	}
+	time.AfterFunc(time.Duration(secs)*time.Second, func() {
+		w.internalPause.Store(false)
+	})
+}
+
+func stallSeconds(chaos string) (int, bool) {
+	raw, ok := strings.CutPrefix(chaos, "stall:")
+	if !ok {
+		return 0, false
+	}
+	secs, err := strconv.Atoi(raw)
+	if err != nil || secs < 0 {
+		return 0, false
+	}
+	return secs, true
+}
+
+func (w *Worker) waitStall() {
+	w.stallMu.Lock()
+	until := w.stallUntil
+	w.stallMu.Unlock()
+	if d := time.Until(until); d > 0 {
+		time.Sleep(d)
 	}
 }

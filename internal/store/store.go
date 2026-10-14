@@ -13,6 +13,8 @@ var (
 	ErrNotFound = errors.New("workflow not found")
 	// ErrWorkerNotFound is returned when a worker id is not registered.
 	ErrWorkerNotFound = errors.New("worker not found")
+	// ErrNoAliveWorker is returned when chaos has no living worker to target.
+	ErrNoAliveWorker = errors.New("no alive worker")
 	// ErrLeaseMismatch is returned when a task heartbeat or completion presents a stale token.
 	ErrLeaseMismatch = errors.New("lease token mismatch")
 	// ErrBadCommand is returned when a completion command is missing required fields.

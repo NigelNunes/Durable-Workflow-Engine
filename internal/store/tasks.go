@@ -72,31 +72,41 @@ func (s *Store) RegisterWorker(ctx context.Context, name string) (string, error)
 }
 
 // HeartbeatWorker records that the worker is alive and extends every lease it holds.
-func (s *Store) HeartbeatWorker(ctx context.Context, id string, leaseTTL time.Duration) error {
+// The returned chaos value is the pending action, which this call consumes.
+func (s *Store) HeartbeatWorker(ctx context.Context, id string, leaseTTL time.Duration) (string, error) {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
-		return fmt.Errorf("begin worker heartbeat: %w", err)
+		return "", fmt.Errorf("begin worker heartbeat: %w", err)
 	}
 	defer tx.Rollback(ctx)
 
-	tag, err := tx.Exec(ctx, `UPDATE workers SET last_heartbeat = now() WHERE id = $1`, id)
-	if err != nil {
-		return fmt.Errorf("update worker heartbeat: %w", err)
+	var chaos *string
+	err = tx.QueryRow(ctx, `SELECT pending_chaos FROM workers WHERE id = $1 FOR UPDATE`, id).Scan(&chaos)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", ErrWorkerNotFound
 	}
-	if tag.RowsAffected() == 0 {
-		return ErrWorkerNotFound
+	if err != nil {
+		return "", fmt.Errorf("lock worker: %w", err)
+	}
+	if _, err := tx.Exec(ctx, `
+		UPDATE workers SET last_heartbeat = now(), pending_chaos = NULL WHERE id = $1
+	`, id); err != nil {
+		return "", fmt.Errorf("update worker heartbeat: %w", err)
 	}
 	if _, err := tx.Exec(ctx, `
 		UPDATE tasks
 		SET lease_expires_at = now() + make_interval(secs => $2), updated_at = now()
 		WHERE status = 'leased' AND lease_owner = $1
 	`, id, LeaseSeconds(leaseTTL)); err != nil {
-		return fmt.Errorf("extend worker leases: %w", err)
+		return "", fmt.Errorf("extend worker leases: %w", err)
 	}
 	if err := tx.Commit(ctx); err != nil {
-		return fmt.Errorf("commit worker heartbeat: %w", err)
+		return "", fmt.Errorf("commit worker heartbeat: %w", err)
 	}
-	return nil
+	if chaos == nil {
+		return "", nil
+	}
+	return *chaos, nil
 }
 
 // PollTask leases one pending task whose kind is in kinds.

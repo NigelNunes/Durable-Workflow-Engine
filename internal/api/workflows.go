@@ -37,6 +37,9 @@ func (s *server) startWorkflow(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "bad_request", "invalid workflow id")
 		return
 	}
+	if err := s.enforceDemoLimits(w, r, req.ID); err != nil {
+		return
+	}
 
 	id, err := s.store.StartWorkflow(r.Context(), req.ID, req.Type, req.Input)
 	if err != nil {

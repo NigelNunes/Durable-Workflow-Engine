@@ -25,12 +25,16 @@ services:
     environment:
       DATABASE_URL: postgres://durable:durable@postgres:5432/durable?sslmode=disable
       DEMO_KEY: dev-demo-key
+      DEMO_MODE: "true"
+      ADMIN_TOKEN: dev-admin-token
+      MAX_RUNNING_WORKFLOWS: "60"
       PORT: "8080"
     ports:
       - "8080:8080"
     depends_on:
       postgres:
         condition: service_healthy
+    restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://localhost:8080/healthz"]
       interval: 2s

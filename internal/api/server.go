@@ -3,6 +3,8 @@ package api
 import (
 	"crypto/subtle"
 	"net/http"
+	"os"
+	"sync"
 	"time"
 
 	"github.com/nigelnunes/durable-flow/internal/store"
@@ -10,9 +12,14 @@ import (
 
 // Config is the HTTP server's view of process settings.
 type Config struct {
-	DemoKey           string
-	LeaseTTL          time.Duration
-	HeartbeatInterval time.Duration
+	DemoKey             string
+	LeaseTTL            time.Duration
+	HeartbeatInterval   time.Duration
+	DemoMode            bool
+	AdminToken          string
+	MaxRunningWorkflows int
+	// Exit replaces os.Exit. Tests use it so a restart does not kill the process.
+	Exit func(int)
 }
 
 // NewHandler serves the engine HTTP API. Every route except GET /healthz
@@ -25,10 +32,22 @@ func NewHandler(st *store.Store, cfg Config) http.Handler {
 	if cfg.HeartbeatInterval <= 0 {
 		cfg.HeartbeatInterval = 3 * time.Second
 	}
+	if cfg.DemoMode && cfg.MaxRunningWorkflows <= 0 {
+		cfg.MaxRunningWorkflows = 60
+	}
+	exit := cfg.Exit
+	if exit == nil {
+		exit = os.Exit
+	}
 	s := &server{
 		store:             st,
 		leaseTTL:          cfg.LeaseTTL,
 		heartbeatInterval: cfg.HeartbeatInterval,
+		demoMode:          cfg.DemoMode,
+		adminToken:        cfg.AdminToken,
+		maxRunning:        cfg.MaxRunningWorkflows,
+		exit:              exit,
+		starts:            newStartLimiter(time.Now),
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", s.healthz)
@@ -44,6 +63,10 @@ func NewHandler(st *store.Store, cfg Config) http.Handler {
 	mux.HandleFunc("POST /v1/tasks/{id}/complete-activity", s.completeActivityTask)
 	mux.HandleFunc("POST /v1/tasks/{id}/fail-activity", s.failActivityTask)
 	mux.HandleFunc("POST /v1/tasks/{id}/fail-workflow", s.failWorkflowTask)
+	mux.HandleFunc("GET /v1/workers", s.listWorkers)
+	mux.HandleFunc("GET /v1/dashboard/state", s.dashboardState)
+	mux.HandleFunc("POST /v1/admin/chaos", s.adminChaos)
+	mux.HandleFunc("POST /v1/admin/restart-engine", s.restartEngine)
 	return requireDemoKey(cfg.DemoKey, mux)
 }
 
@@ -51,6 +74,14 @@ type server struct {
 	store             *store.Store
 	leaseTTL          time.Duration
 	heartbeatInterval time.Duration
+	demoMode          bool
+	adminToken        string
+	maxRunning        int
+	exit              func(int)
+	starts            *startLimiter
+	coolMu            sync.Mutex
+	lastChaos         time.Time
+	lastRestart       time.Time
 }
 
 func (s *server) healthz(w http.ResponseWriter, _ *http.Request) {

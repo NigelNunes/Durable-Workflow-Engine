@@ -54,7 +54,7 @@ func (s *server) registerWorker(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) heartbeatWorker(w http.ResponseWriter, r *http.Request) {
-	err := s.store.HeartbeatWorker(r.Context(), r.PathValue("id"), s.leaseTTL)
+	chaos, err := s.store.HeartbeatWorker(r.Context(), r.PathValue("id"), s.leaseTTL)
 	if errors.Is(err, store.ErrWorkerNotFound) {
 		writeError(w, http.StatusNotFound, "not_found", "worker not found")
 		return
@@ -64,7 +64,11 @@ func (s *server) heartbeatWorker(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "internal", "internal error")
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"chaos": nil})
+	var delivered any
+	if chaos != "" {
+		delivered = chaos
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"chaos": delivered})
 }
 
 func (s *server) pollTasks(w http.ResponseWriter, r *http.Request) {

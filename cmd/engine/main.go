@@ -56,6 +56,15 @@ func run() error {
 	if err != nil {
 		return err
 	}
+	demoMode := os.Getenv("DEMO_MODE") == "true"
+	adminToken := os.Getenv("ADMIN_TOKEN")
+	if demoMode && adminToken == "" {
+		return fmt.Errorf("ADMIN_TOKEN is required when DEMO_MODE is true")
+	}
+	maxRunning, err := envInt("MAX_RUNNING_WORKFLOWS", 60)
+	if err != nil {
+		return err
+	}
 
 	ctx := context.Background()
 	if _, err := store.Migrate(ctx, databaseURL, migrations.FS); err != nil {
@@ -75,9 +84,12 @@ func run() error {
 	srv := &http.Server{
 		Addr: ":" + port,
 		Handler: api.NewHandler(st, api.Config{
-			DemoKey:           demoKey,
-			LeaseTTL:          leaseTTL,
-			HeartbeatInterval: heartbeatInterval,
+			DemoKey:             demoKey,
+			LeaseTTL:            leaseTTL,
+			HeartbeatInterval:   heartbeatInterval,
+			DemoMode:            demoMode,
+			AdminToken:          adminToken,
+			MaxRunningWorkflows: maxRunning,
 		}),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
