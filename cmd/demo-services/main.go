@@ -76,6 +76,7 @@ func (s *server) routes() http.Handler {
 	mux.HandleFunc("POST /inventory/reserve", s.reserve)
 	mux.HandleFunc("POST /email/send", s.send)
 	mux.HandleFunc("POST /admin/payments/fail", s.setFailing)
+	mux.HandleFunc("GET /admin/payments/fail", s.getFailing)
 	mux.HandleFunc("GET /stats", s.stats)
 	return mux
 }
@@ -198,6 +199,10 @@ func (s *server) setFailing(w http.ResponseWriter, r *http.Request) {
 	s.failing = body.Enabled
 	s.mu.Unlock()
 	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *server) getFailing(w http.ResponseWriter, _ *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]bool{"enabled": s.paymentsFailing()})
 }
 
 func (s *server) stats(w http.ResponseWriter, r *http.Request) {

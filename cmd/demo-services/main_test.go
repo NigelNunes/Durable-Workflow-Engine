@@ -127,6 +127,50 @@ func postCharge(t *testing.T, base, key string) chargeBody {
 	return out
 }
 
+func TestPaymentsFailToggle(t *testing.T) {
+	srv := httptest.NewServer((&server{}).routes())
+	t.Cleanup(srv.Close)
+
+	res, err := http.Get(srv.URL + "/admin/payments/fail")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer res.Body.Close()
+	var body struct {
+		Enabled bool `json:"enabled"`
+	}
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("get status %d", res.StatusCode)
+	}
+	if err := json.NewDecoder(res.Body).Decode(&body); err != nil {
+		t.Fatal(err)
+	}
+	if body.Enabled {
+		t.Fatal("payments start failing")
+	}
+
+	post, err := http.Post(srv.URL+"/admin/payments/fail", "application/json", bytes.NewBufferString(`{"enabled":true}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer post.Body.Close()
+	if post.StatusCode != http.StatusNoContent {
+		t.Fatalf("post status %d", post.StatusCode)
+	}
+
+	again, err := http.Get(srv.URL + "/admin/payments/fail")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer again.Body.Close()
+	if err := json.NewDecoder(again.Body).Decode(&body); err != nil {
+		t.Fatal(err)
+	}
+	if !body.Enabled {
+		t.Fatal("payments still accepting")
+	}
+}
+
 func getStats(t *testing.T, base string) stats {
 	t.Helper()
 	res, err := http.Get(base + "/stats")

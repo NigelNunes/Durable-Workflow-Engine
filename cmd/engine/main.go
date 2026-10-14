@@ -80,6 +80,9 @@ func run() error {
 	defer cancel()
 	go engine.RunReaper(reapCtx, st, reaperInterval, maxRedeliveries)
 	go engine.RunScheduler(reapCtx, st, schedulerInterval)
+	if demoMode {
+		go engine.RunCleaner(reapCtx, st, time.Minute)
+	}
 
 	srv := &http.Server{
 		Addr: ":" + port,
