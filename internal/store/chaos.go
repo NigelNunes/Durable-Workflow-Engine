@@ -26,7 +26,7 @@ func (s *Store) ArmChaos(ctx context.Context, workerID, value string, aliveFor t
 		err = tx.QueryRow(ctx, `
 			SELECT id FROM workers
 			WHERE last_heartbeat > now() - ($1::bigint * interval '1 millisecond')
-			ORDER BY random()
+			ORDER BY last_heartbeat DESC
 			LIMIT 1
 			FOR UPDATE
 		`, aliveFor.Milliseconds()).Scan(&id)

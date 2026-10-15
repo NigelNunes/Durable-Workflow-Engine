@@ -402,20 +402,8 @@ const CSS = `
 
 .ghr-word {
   display: inline-block;
-  opacity: 0;
-  transform: translateY(0.28em);
-}
-
-.ghr-root[data-glass="true"] .ghr-word,
-.ghr-root[data-fallback="true"] .ghr-word {
-  animation: ghr-word-in 0.65s forwards;
-}
-
-@keyframes ghr-word-in {
-  to {
-    opacity: 1;
-    transform: translateY(0);
-  }
+  /* No translateY — that shifted the headline up after glass formed. */
+  opacity: 1;
 }
 
 .ghr-desc {
@@ -796,9 +784,32 @@ export default function GlassHeadlineHero({
     let fboHeight: { fb: WebGLFramebuffer; tex: WebGLTexture } | null = null;
     let maskReady = false;
     let glassFade = 0;
+    let maskLayout = "";
+    let fontsSettled = false;
 
-    const uploadMask = () => {
+    const layoutKey = () => {
+      const heading = root.querySelector(".ghr-title");
+      if (!heading) return "";
+      const box = root.getBoundingClientRect();
+      const spans = Array.from(root.querySelectorAll<HTMLElement>(".ghr-word"));
+      const cs = getComputedStyle(heading);
+      return [
+        canvas.width,
+        canvas.height,
+        cs.font,
+        cs.letterSpacing,
+        ...spans.map((span) => {
+          const r = span.getBoundingClientRect();
+          return `${span.textContent}@${Math.round(r.left - box.left)},${Math.round(r.top - box.top)},${Math.round(r.width)},${Math.round(r.height)}`;
+        }),
+      ].join("|");
+    };
+
+    const uploadMask = (force = false) => {
+      const key = layoutKey();
+      if (!force && key && key === maskLayout) return;
       if (!buildMask(root, canvas, maskCanvas, ctx2d)) return;
+      maskLayout = key;
       gl.bindTexture(gl.TEXTURE_2D, maskTex);
       gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
       gl.texImage2D(
@@ -841,7 +852,7 @@ export default function GlassHeadlineHero({
       fboB = makeFBO(gl, w, h, false);
       fboHeight = makeFBO(gl, w, h, false);
 
-      requestAnimationFrame(uploadMask);
+      requestAnimationFrame(() => uploadMask());
     };
 
     resize();
@@ -926,10 +937,10 @@ export default function GlassHeadlineHero({
       const lightX = sm.x + ox * idle;
       const lightY = sm.y + oy * idle;
 
-      if (maskReady) {
+      if (maskReady && fontsSettled) {
         runHeightPass();
         glassFade = follow(glassFade, 1, 3.2, dt);
-        // Reveal as soon as the mask exists — title stays transparent, no white flash.
+        // Reveal only after fonts + mask are stable so the headline does not jump.
         if (!glassFlagRef.current) {
           glassFlagRef.current = true;
           window.clearTimeout(fallbackTimer);
@@ -1010,20 +1021,35 @@ export default function GlassHeadlineHero({
     window.addEventListener("pointermove", onMove);
     window.addEventListener("resize", onResize);
 
+    let settleQueued = false;
+    const settleFonts = () => {
+      if (disposed || settleQueued) return;
+      settleQueued = true;
+      // Two frames after fonts so layout metrics match the final display face.
+      requestAnimationFrame(() => {
+        requestAnimationFrame(() => {
+          if (disposed) return;
+          uploadMask(true);
+          fontsSettled = true;
+        });
+      });
+    };
+
     const fontReady = document.fonts?.ready;
     if (fontReady) {
-      fontReady.then(() => uploadMask()).catch(() => uploadMask());
+      fontReady.then(settleFonts).catch(settleFonts);
     } else {
-      uploadMask();
+      settleFonts();
     }
 
-    const maskTimer = window.setTimeout(uploadMask, FORM_MS);
+    // Safety: if fonts.ready hangs, still show glass.
+    const fontsTimer = window.setTimeout(settleFonts, 900);
 
     return () => {
       disposed = true;
       running = false;
       cancelAnimationFrame(rafRef.current);
-      window.clearTimeout(maskTimer);
+      window.clearTimeout(fontsTimer);
       window.clearTimeout(fallbackTimer);
       window.removeEventListener("pointermove", onMove);
       window.removeEventListener("resize", onResize);
@@ -1066,12 +1092,7 @@ export default function GlassHeadlineHero({
           <h1 className="ghr-title">
             {words.map((word, i) => (
               <React.Fragment key={`${word}-${i}`}>
-                <span
-                  className="ghr-word"
-                  style={{ animationDelay: `${0.1 + i * 0.08}s` }}
-                >
-                  {word}
-                </span>
+                <span className="ghr-word">{word}</span>
                 {i < words.length - 1 ? " " : null}
               </React.Fragment>
             ))}

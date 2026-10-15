@@ -19,15 +19,16 @@ type WorkerView struct {
 
 // DashboardWorkflow is one workflow row shaped for the dashboard.
 type DashboardWorkflow struct {
-	ID          string    `json:"id"`
-	Type        string    `json:"type"`
-	Status      string    `json:"status"`
-	CurrentStep string    `json:"current_step"`
-	StepIndex   int       `json:"step_index"`
-	TotalSteps  int       `json:"total_steps"`
-	OwnerWorker string    `json:"owner_worker"`
-	Resumed     bool      `json:"resumed"`
-	CreatedAt   time.Time `json:"created_at"`
+	ID            string    `json:"id"`
+	Type          string    `json:"type"`
+	Status        string    `json:"status"`
+	CurrentStep   string    `json:"current_step"`
+	StepIndex     int       `json:"step_index"`
+	TotalSteps    int       `json:"total_steps"`
+	OwnerWorker   string    `json:"owner_worker"`
+	OwnerWorkerID string    `json:"owner_worker_id"`
+	Resumed       bool      `json:"resumed"`
+	CreatedAt     time.Time `json:"created_at"`
 }
 
 // DashboardCounters are whole-table totals, not a page of workflows.
@@ -92,6 +93,11 @@ func (s *Store) DashboardWorkflows(ctx context.Context, limit int) ([]DashboardW
 				WHERE t.workflow_id = w.id AND t.status = 'leased' AND t.lease_owner IS NOT NULL
 				ORDER BY t.updated_at DESC LIMIT 1
 			), ''),
+			COALESCE((
+				SELECT t.lease_owner FROM tasks t
+				WHERE t.workflow_id = w.id AND t.status = 'leased' AND t.lease_owner IS NOT NULL
+				ORDER BY t.updated_at DESC LIMIT 1
+			), ''),
 			EXISTS (
 				SELECT 1 FROM workflow_events e
 				WHERE e.workflow_id = w.id AND e.type IN ($2, $3)
@@ -109,7 +115,7 @@ func (s *Store) DashboardWorkflows(ctx context.Context, limit int) ([]DashboardW
 	for rows.Next() {
 		var w DashboardWorkflow
 		var scheduled int
-		if err := rows.Scan(&w.ID, &w.Type, &w.Status, &w.CurrentStep, &scheduled, &w.OwnerWorker, &w.Resumed, &w.CreatedAt); err != nil {
+		if err := rows.Scan(&w.ID, &w.Type, &w.Status, &w.CurrentStep, &scheduled, &w.OwnerWorker, &w.OwnerWorkerID, &w.Resumed, &w.CreatedAt); err != nil {
 			return nil, fmt.Errorf("scan dashboard workflow: %w", err)
 		}
 		if scheduled > 0 {

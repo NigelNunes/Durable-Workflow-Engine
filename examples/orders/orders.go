@@ -16,13 +16,15 @@ import (
 	"github.com/nigelnunes/durable-flow/sdk/workflow"
 )
 
-// Input is one order to fulfil.
+// Input is one order to fulfil. PaceSeconds is a durable pause between steps
+// so a live demo is easy to narrate (0 skips the pause).
 type Input struct {
 	OrderID     string `json:"order_id"`
 	AmountCents int    `json:"amount_cents"`
 	SKU         string `json:"sku"`
 	Qty         int    `json:"qty"`
 	Email       string `json:"email"`
+	PaceSeconds int    `json:"pace_seconds"`
 }
 
 // Result is the workflow return value.
@@ -76,8 +78,14 @@ func Workflow(ctx workflow.Context, in Input) (Result, error) {
 	if err != nil {
 		return Result{}, err
 	}
+	if err := pace(ctx, in.PaceSeconds); err != nil {
+		return Result{}, err
+	}
 	if _, err := workflow.Activity[ReserveIn, ReserveOut](ctx, "ReserveStock",
 		ReserveIn{OrderID: in.OrderID, SKU: in.SKU, Qty: in.Qty}, retry); err != nil {
+		return Result{}, err
+	}
+	if err := pace(ctx, in.PaceSeconds); err != nil {
 		return Result{}, err
 	}
 	if _, err := workflow.Activity[ReceiptIn, struct{}](ctx, "SendReceipt",
@@ -85,6 +93,13 @@ func Workflow(ctx workflow.Context, in Input) (Result, error) {
 		return Result{}, err
 	}
 	return Result{Status: "fulfilled"}, nil
+}
+
+func pace(ctx workflow.Context, seconds int) error {
+	if seconds <= 0 {
+		return nil
+	}
+	return ctx.Sleep(time.Duration(seconds) * time.Second)
 }
 
 // ChargeCard calls the payments service with this activity's idempotency key.

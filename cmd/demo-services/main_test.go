@@ -171,6 +171,112 @@ func TestPaymentsFailToggle(t *testing.T) {
 	}
 }
 
+func TestTransferDebitCreditFailAndRefund(t *testing.T) {
+	pool, err := pgxpool.New(context.Background(), os.Getenv("DATABASE_URL"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(pool.Close)
+	srv := httptest.NewServer((&server{pool: pool}).routes())
+	t.Cleanup(srv.Close)
+
+	const accountID = "phase11-acct"
+	t.Cleanup(func() {
+		_, _ = pool.Exec(context.Background(), `DELETE FROM demo.transfers_log WHERE account_id = $1`, accountID)
+		_, _ = pool.Exec(context.Background(), `DELETE FROM demo.accounts WHERE id = $1`, accountID)
+	})
+
+	createRes, err := http.Post(srv.URL+"/accounts", "application/json", bytes.NewBufferString(`{"id":"phase11-acct"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer createRes.Body.Close()
+	if createRes.StatusCode != http.StatusOK {
+		t.Fatalf("create status %d", createRes.StatusCode)
+	}
+
+	postMove(t, srv.URL, "/accounts/credit", "phase11-credit", accountID, 5000)
+	postMove(t, srv.URL, "/accounts/debit", "phase11-debit", accountID, 1000)
+	postMove(t, srv.URL, "/accounts/debit", "phase11-debit", accountID, 1000)
+	if got := accountBalance(t, pool, accountID); got != 4000 {
+		t.Fatalf("balance after two debits %d", got)
+	}
+	var debits int
+	if err := pool.QueryRow(context.Background(), `
+		SELECT count(*) FROM demo.transfers_log WHERE idempotency_key = 'phase11-debit'
+	`).Scan(&debits); err != nil {
+		t.Fatal(err)
+	}
+	if debits != 1 {
+		t.Fatalf("debit rows %d", debits)
+	}
+
+	fail, err := http.Post(srv.URL+"/admin/credit/fail", "application/json", bytes.NewBufferString(`{"enabled":true}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer fail.Body.Close()
+	if fail.StatusCode != http.StatusNoContent {
+		t.Fatalf("credit fail status %d", fail.StatusCode)
+	}
+	denied := postMoveStatus(t, srv.URL, "/accounts/credit", "phase11-credit-fail", accountID, 100)
+	if denied != http.StatusConflict {
+		t.Fatalf("credit fail status %d", denied)
+	}
+	var failedRows int
+	if err := pool.QueryRow(context.Background(), `
+		SELECT count(*) FROM demo.transfers_log WHERE idempotency_key = 'phase11-credit-fail'
+	`).Scan(&failedRows); err != nil {
+		t.Fatal(err)
+	}
+	if failedRows != 0 || accountBalance(t, pool, accountID) != 4000 {
+		t.Fatalf("credit fail wrote a row or moved the balance, rows %d", failedRows)
+	}
+
+	off, err := http.Post(srv.URL+"/admin/credit/fail", "application/json", bytes.NewBufferString(`{"enabled":false}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer off.Body.Close()
+	postMove(t, srv.URL, "/accounts/refund", "phase11-refund", accountID, 1000)
+	if got := accountBalance(t, pool, accountID); got != 5000 {
+		t.Fatalf("balance after refund %d", got)
+	}
+}
+
+func postMove(t *testing.T, base, path, key, account string, amount int) {
+	t.Helper()
+	if status := postMoveStatus(t, base, path, key, account, amount); status != http.StatusOK {
+		t.Fatalf("%s status %d", path, status)
+	}
+}
+
+func postMoveStatus(t *testing.T, base, path, key, account string, amount int) int {
+	t.Helper()
+	body := bytes.NewBufferString(fmt.Sprintf(`{"account_id":%q,"amount_cents":%d}`, account, amount))
+	req, err := http.NewRequest(http.MethodPost, base+path, body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Idempotency-Key", key)
+	res, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer res.Body.Close()
+	return res.StatusCode
+}
+
+func accountBalance(t *testing.T, pool *pgxpool.Pool, id string) int64 {
+	t.Helper()
+	var balance int64
+	if err := pool.QueryRow(context.Background(), `SELECT balance_cents FROM demo.accounts WHERE id = $1`, id).Scan(&balance); err != nil {
+		t.Fatal(err)
+	}
+	return balance
+}
+
 func getStats(t *testing.T, base string) stats {
 	t.Helper()
 	res, err := http.Get(base + "/stats")

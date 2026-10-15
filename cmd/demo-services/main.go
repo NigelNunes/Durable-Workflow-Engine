@@ -63,8 +63,9 @@ type server struct {
 	pool    *pgxpool.Pool
 	latency time.Duration
 
-	mu      sync.Mutex
-	failing bool
+	mu         sync.Mutex
+	failing    bool
+	creditDown bool
 }
 
 func (s *server) routes() http.Handler {
@@ -75,8 +76,15 @@ func (s *server) routes() http.Handler {
 	mux.HandleFunc("POST /payments/charge", s.charge)
 	mux.HandleFunc("POST /inventory/reserve", s.reserve)
 	mux.HandleFunc("POST /email/send", s.send)
+	mux.HandleFunc("POST /accounts", s.createAccount)
+	mux.HandleFunc("POST /accounts/debit", s.debit)
+	mux.HandleFunc("POST /accounts/credit", s.credit)
+	mux.HandleFunc("POST /accounts/refund", s.refund)
+	mux.HandleFunc("POST /reports/step", s.reportStep)
 	mux.HandleFunc("POST /admin/payments/fail", s.setFailing)
 	mux.HandleFunc("GET /admin/payments/fail", s.getFailing)
+	mux.HandleFunc("POST /admin/credit/fail", s.setCreditFailing)
+	mux.HandleFunc("GET /admin/credit/fail", s.getCreditFail)
 	mux.HandleFunc("GET /stats", s.stats)
 	return mux
 }
@@ -213,6 +221,128 @@ func (s *server) stats(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, out)
+}
+
+func (s *server) createAccount(w http.ResponseWriter, r *http.Request) {
+	s.pause()
+	var body struct {
+		ID string `json:"id"`
+	}
+	if !decode(w, r, &body) {
+		return
+	}
+	if body.ID == "" {
+		writeError(w, http.StatusBadRequest, "id is required")
+		return
+	}
+	out, err := createAccount(r.Context(), s.pool, body.ID)
+	if err != nil {
+		slog.Error("create account", "err", err)
+		writeError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+func (s *server) debit(w http.ResponseWriter, r *http.Request) {
+	s.move(w, r, "debit")
+}
+
+func (s *server) credit(w http.ResponseWriter, r *http.Request) {
+	s.pause()
+	if s.creditFailing() {
+		writeError(w, http.StatusConflict, "credit failed")
+		return
+	}
+	s.move(w, r, "credit")
+}
+
+func (s *server) refund(w http.ResponseWriter, r *http.Request) {
+	s.move(w, r, "refund")
+}
+
+func (s *server) move(w http.ResponseWriter, r *http.Request, kind string) {
+	if kind != "credit" {
+		s.pause()
+	}
+	key, ok := idempotencyKey(w, r)
+	if !ok {
+		return
+	}
+	var body struct {
+		AccountID   string `json:"account_id"`
+		AmountCents int64  `json:"amount_cents"`
+	}
+	if !decode(w, r, &body) {
+		return
+	}
+	if body.AccountID == "" || body.AmountCents < 1 {
+		writeError(w, http.StatusBadRequest, "account_id and amount_cents are required")
+		return
+	}
+	out, err := applyTransfer(r.Context(), s.pool, key, body.AccountID, kind, body.AmountCents)
+	if errors.Is(err, errRetryTransfer) {
+		out, err = applyTransfer(r.Context(), s.pool, key, body.AccountID, kind, body.AmountCents)
+	}
+	if errors.Is(err, errNoFunds) {
+		writeError(w, http.StatusConflict, "not enough money")
+		return
+	}
+	if err != nil {
+		slog.Error("transfer", "kind", kind, "err", err)
+		writeError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+func (s *server) reportStep(w http.ResponseWriter, r *http.Request) {
+	s.pause()
+	key, ok := idempotencyKey(w, r)
+	if !ok {
+		return
+	}
+	var body reportStep
+	if !decode(w, r, &body) {
+		return
+	}
+	if body.ReportID == "" || body.Name == "" {
+		writeError(w, http.StatusBadRequest, "report_id and name are required")
+		return
+	}
+	out, err := recordReportStep(r.Context(), s.pool, key, body)
+	if errors.Is(err, errRetryReport) {
+		out, err = recordReportStep(r.Context(), s.pool, key, body)
+	}
+	if err != nil {
+		slog.Error("report step", "err", err)
+		writeError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+func (s *server) setCreditFailing(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Enabled bool `json:"enabled"`
+	}
+	if !decode(w, r, &body) {
+		return
+	}
+	s.mu.Lock()
+	s.creditDown = body.Enabled
+	s.mu.Unlock()
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *server) getCreditFail(w http.ResponseWriter, _ *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]bool{"enabled": s.creditFailing()})
+}
+
+func (s *server) creditFailing() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.creditDown
 }
 
 func (s *server) paymentsFailing() bool {

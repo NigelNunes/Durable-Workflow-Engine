@@ -1,26 +1,30 @@
 import { engineFetch, unavailable } from "@/lib/engine";
+import {
+  DEFAULT_BATCH,
+  ONBOARDING_DELAY_SECONDS,
+  PACE_SECONDS,
+  type ScenarioType,
+  isScenarioType,
+} from "@/lib/scenarios";
 
 export const dynamic = "force-dynamic";
 
-const scenarios = ["order_fulfilment", "user_onboarding", "money_transfer", "report_pipeline"] as const;
-
-type Scenario = (typeof scenarios)[number];
-
 export async function POST(request: Request) {
-  const body = (await request.json().catch(() => ({}))) as { type?: string };
+  const body = (await request.json().catch(() => ({}))) as { type?: string; count?: number };
   const type = body.type ?? "order_fulfilment";
-  if (!scenarios.includes(type as Scenario)) {
+  if (!isScenarioType(type)) {
     return Response.json({ error: "unknown scenario", code: "bad_request" }, { status: 400 });
   }
+  const count = clampCount(body.count);
   const stamp = Date.now();
-  const prefix = prefixFor(type as Scenario);
+  const prefix = prefixFor(type);
   let started = 0;
   try {
-    for (let i = 1; i <= 12; i++) {
+    for (let i = 1; i <= count; i++) {
       const id = `${prefix}-${stamp}-${i}`;
       const res = await engineFetch("/v1/workflows", {
         method: "POST",
-        body: JSON.stringify({ id, type, input: inputFor(type as Scenario, id) }),
+        body: JSON.stringify({ id, type, input: inputFor(type, id) }),
       });
       if (!res.ok) {
         const failure = (await res.json().catch(() => ({}))) as { error?: string; code?: string };
@@ -37,7 +41,14 @@ export async function POST(request: Request) {
   return Response.json({ started });
 }
 
-function prefixFor(type: Scenario): string {
+function clampCount(value: number | undefined): number {
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    return DEFAULT_BATCH;
+  }
+  return Math.min(5, Math.max(1, Math.round(value)));
+}
+
+function prefixFor(type: ScenarioType): string {
   switch (type) {
     case "user_onboarding":
       return "onb";
@@ -50,15 +61,28 @@ function prefixFor(type: Scenario): string {
   }
 }
 
-function inputFor(type: Scenario, id: string): Record<string, unknown> {
+function inputFor(type: ScenarioType, id: string): Record<string, unknown> {
   switch (type) {
     case "user_onboarding":
-      return { user_id: id, email: "new@example.com", delay_seconds: 30 };
+      return { user_id: id, email: "new@example.com", delay_seconds: ONBOARDING_DELAY_SECONDS };
     case "money_transfer":
-      return { transfer_id: id, from_account: "alice", to_account: "bob", amount_cents: 1000 };
+      return {
+        transfer_id: id,
+        from_account: "alice",
+        to_account: "bob",
+        amount_cents: 1000,
+        pace_seconds: PACE_SECONDS,
+      };
     case "report_pipeline":
-      return { report_id: id };
+      return { report_id: id, pace_seconds: PACE_SECONDS };
     default:
-      return { order_id: id, amount_cents: 2500, sku: "widget", qty: 1, email: "buyer@example.com" };
+      return {
+        order_id: id,
+        amount_cents: 2500,
+        sku: "widget",
+        qty: 1,
+        email: "buyer@example.com",
+        pace_seconds: PACE_SECONDS,
+      };
   }
 }
