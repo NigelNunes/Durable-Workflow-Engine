@@ -1,5 +1,32 @@
 # Guarantees
 
+## What the engine guarantees
+
+1. **Durable workflow state.** Once the engine accepts a command, it is persisted in Postgres in the same transaction that enqueues follow-up work. A crash of any worker, or of the engine process itself, does not lose workflow progress.
+2. **Each activity's result is recorded at most once.** The history never contains two `ActivityCompleted` events for the same command.
+3. **Crash recovery.** If a worker dies mid-workflow-task or mid-activity, the lease expires and another worker takes over. Time to recover is bounded by `LEASE_TTL` plus poll interval.
+4. **Stale workers cannot corrupt state.** Fencing tokens reject late completions from workers that lost their lease.
+5. **Retries with backoff** for failed activities, up to a configured limit.
+6. **Durable timers** that fire even if everything restarts during the sleep.
+7. **Detection of non-deterministic workflow code** instead of silently producing wrong behavior.
+
+## What it does not guarantee
+
+- **Not exactly-once execution of activities.** It is at-least-once. If a worker crashes after the external side effect happens but before the result is recorded, the activity runs again. The correct claim is "no duplicate side effects when activities honor the idempotency key", not "no duplicate executions".
+- **Not highly available.** One Postgres instance is a single point of failure. One engine process is a single point of failure for new task dispatch (workers and history remain safe).
+- **Not horizontally scaled engine.** The engine could run multiple replicas (all state is in Postgres and locking is row-based), but v1 targets one.
+- **Not production grade.** No auth beyond a shared key, no multi-tenancy, no workflow versioning, no history archival.
+
+## Explicit non-goals for v1
+
+- Multiple language SDKs (Go only).
+- Workflow versioning and migration of in-flight workflows.
+- Signals, queries, child workflows.
+- Parallel activity fan-out (v1 workflows are sequential).
+- A clustered engine with sharding.
+
+## Chaos results (Phase 7)
+
 Phase 7 recorded these results. Each scenario ran 20 times against Compose Postgres. Workers and the engine were OS processes. A failed iteration stops that scenario. None failed in the run below.
 
 The fake charge service is in the test process. It is not the Phase 8 demo schema. The same idempotency rule is what the assertions check: one key, one charge.
