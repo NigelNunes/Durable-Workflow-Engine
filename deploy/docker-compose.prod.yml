@@ -1,0 +1,153 @@
+name: durable-flow-prod
+
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: durable
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env.prod}
+      POSTGRES_DB: durable
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U durable -d durable"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    mem_limit: 400m
+    networks:
+      - backend
+
+  migrate:
+    image: durable-flow-migrate:prod
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.migrate
+    environment:
+      DATABASE_URL: postgres://durable:${POSTGRES_PASSWORD}@postgres:5432/durable?sslmode=disable
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+    mem_limit: 256m
+    networks:
+      - backend
+
+  engine:
+    image: durable-flow-engine:prod
+    build:
+      context: ..
+      dockerfile: cmd/engine/Dockerfile
+    environment:
+      DATABASE_URL: postgres://durable:${POSTGRES_PASSWORD}@postgres:5432/durable?sslmode=disable
+      DEMO_KEY: ${DEMO_KEY:?Set DEMO_KEY in .env.prod}
+      DEMO_MODE: "true"
+      ADMIN_TOKEN: ${ADMIN_TOKEN:?Set ADMIN_TOKEN in .env.prod}
+      PORT: "8080"
+      LEASE_TTL: ${LEASE_TTL:-5s}
+      HEARTBEAT_INTERVAL: ${HEARTBEAT_INTERVAL:-1500ms}
+      REAPER_INTERVAL: ${REAPER_INTERVAL:-1s}
+      SCHEDULER_INTERVAL: ${SCHEDULER_INTERVAL:-500ms}
+      MAX_RUNNING_WORKFLOWS: "60"
+    ports:
+      - "127.0.0.1:8080:8080"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8080/healthz"]
+      interval: 10s
+      timeout: 3s
+      retries: 6
+      start_period: 10s
+    mem_limit: 384m
+    networks:
+      - backend
+
+  demo-services:
+    image: durable-flow-demo-services:prod
+    build:
+      context: ..
+      dockerfile: cmd/demo-services/Dockerfile
+    environment:
+      DATABASE_URL: postgres://durable:${POSTGRES_PASSWORD}@postgres:5432/durable?sslmode=disable
+      PORT: "8081"
+      LATENCY: ${LATENCY:-200ms}
+    ports:
+      - "127.0.0.1:8081:8081"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8081/healthz"]
+      interval: 10s
+      timeout: 3s
+      retries: 6
+      start_period: 10s
+    mem_limit: 256m
+    networks:
+      - backend
+
+  worker-a:
+    image: durable-flow-worker:prod
+    build:
+      context: ..
+      dockerfile: cmd/demo-worker/Dockerfile
+    environment:
+      ENGINE_URL: http://engine:8080
+      DEMO_KEY: ${DEMO_KEY:?Set DEMO_KEY in .env.prod}
+      SERVICES_URL: http://demo-services:8081
+      WORKER_NAME: worker-a
+    depends_on:
+      engine:
+        condition: service_healthy
+      demo-services:
+        condition: service_healthy
+    restart: unless-stopped
+    mem_limit: 160m
+    networks:
+      - backend
+
+  worker-b:
+    image: durable-flow-worker:prod
+    environment:
+      ENGINE_URL: http://engine:8080
+      DEMO_KEY: ${DEMO_KEY:?Set DEMO_KEY in .env.prod}
+      SERVICES_URL: http://demo-services:8081
+      WORKER_NAME: worker-b
+    depends_on:
+      engine:
+        condition: service_healthy
+      demo-services:
+        condition: service_healthy
+    restart: unless-stopped
+    mem_limit: 160m
+    networks:
+      - backend
+
+  worker-c:
+    image: durable-flow-worker:prod
+    environment:
+      ENGINE_URL: http://engine:8080
+      DEMO_KEY: ${DEMO_KEY:?Set DEMO_KEY in .env.prod}
+      SERVICES_URL: http://demo-services:8081
+      WORKER_NAME: worker-c
+    depends_on:
+      engine:
+        condition: service_healthy
+      demo-services:
+        condition: service_healthy
+    restart: unless-stopped
+    mem_limit: 160m
+    networks:
+      - backend
+
+volumes:
+  pgdata:
+
+networks:
+  backend:
+    driver: bridge
